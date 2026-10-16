@@ -1,0 +1,9 @@
+---
+description: Bookly three-plane architecture and money-safety rules
+globs: app/**/*.py, tests/**/*.py
+alwaysApply: true
+---
+Follow AGENTS.md. When adding a tool: register it in app/tools/definitions.py
+with required_slots, add the decision function to app/policy/engine.py, add the
+system call to app/backend/bookly_api.py, extend MockProvider in
+app/llm/providers.py, and add scenario tests. Keep README counts accurate.
