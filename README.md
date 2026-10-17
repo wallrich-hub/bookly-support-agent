@@ -483,3 +483,4 @@ scripts/seed_mockapi.py seed and verify a live mockapi.io project
   and refunds have live backends (mockapi.io and Stripe); returns would need
   idempotency keys persisted upstream, which mockapi.io cannot model.
 - Stripe runs in test mode only. A `sk_live_` key is refused at startup.
+
