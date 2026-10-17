@@ -18,7 +18,7 @@ from datetime import datetime, timezone  # noqa: F401  (audit timestamps)
 from typing import Any
 
 from . import data
-from .oms import get_oms
+from .oms import OmsUnavailable, get_oms
 from .payments import PaymentError, get_gateway  # noqa: F401
 
 
@@ -69,6 +69,35 @@ def get_order(order_id: str) -> dict[str, Any]:
     if not order:
         return _err("order_not_found", f"No order {order_id}.")
     return _ok(order)
+
+
+def cancel_order(order_id: str) -> dict[str, Any]:
+    """POST /v1/orders/{order_id}/cancel  (idempotent on order_id)
+
+    Status only. The refund is a separate call, with its own idempotency key,
+    and this function never makes it. Replaying a cancel returns the cancelled
+    order and does not write a second record.
+    """
+    try:
+        current = get_oms().get_order(order_id)
+    except OmsUnavailable as exc:
+        _audit("cancel_order", {"order_id": order_id}, f"failed: {exc}")
+        return _err("oms_unavailable", str(exc))
+    if not current:
+        return _err("order_not_found", f"No order {order_id}.")
+    if current.get("status") == "cancelled":
+        _audit("cancel_order", {"order_id": order_id}, "replayed")
+        return _ok({**current, "replayed": True})
+    try:
+        cancelled = get_oms().cancel_order(order_id)
+    except OmsUnavailable as exc:
+        _audit("cancel_order", {"order_id": order_id}, f"failed: {exc}")
+        return _err("oms_unavailable", str(exc))
+    if not cancelled:
+        _audit("cancel_order", {"order_id": order_id}, "failed")
+        return _err("cancel_failed", f"Could not cancel {order_id}.")
+    _audit("cancel_order", {"order_id": order_id}, "cancelled")
+    return _ok(cancelled)
 
 
 def get_shipment(tracking_id: str) -> dict[str, Any]:

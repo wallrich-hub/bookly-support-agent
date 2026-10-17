@@ -5,7 +5,7 @@ memory. It must retrieve a passage, and the passage id must be attached to the
 answer. If retrieval scores below threshold we return NO passages, which the
 orchestrator turns into an escalation rather than a guess.
 
-Retrieval here is TF-IDF lexical scoring over six chunks held in this file -
+Retrieval here is TF-IDF lexical scoring over seven chunks held in this file -
 deliberately the thinnest thing that satisfies the contract above. Not BM25:
 there is no k1 term-frequency saturation and no b length normalisation, which
 are the two things that make BM25 what it is. Being precise about that matters,
@@ -83,6 +83,17 @@ CHUNKS: list[dict] = [
         ),
     },
     {
+        "id": "KB-CAN-01",
+        "title": "Cancelling an order",
+        "text": (
+            "Cancellation policy: Bookly can cancel an order only while it is "
+            "still processing and has not shipped. Cancelling refunds the full "
+            "order total to the original payment method. Once an order has "
+            "shipped or been delivered, cancellation is no longer available and "
+            "a delivered book follows the returns window instead."
+        ),
+    },
+    {
         "id": "KB-PAY-01",
         "title": "Refund timing",
         "text": (
@@ -127,6 +138,7 @@ def ref(chunk_id: str) -> str:
 # so the passage and the reference to it cannot drift apart.
 RETURNS_WINDOW = ref("KB-RET-01")
 NON_RETURNABLE = ref("KB-RET-02")
+CANCELLATION = ref("KB-CAN-01")
 
 _STOP = {
     "a", "an", "and", "are", "as", "at", "be", "can", "do", "for", "from", "how",

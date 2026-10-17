@@ -46,7 +46,7 @@ Force a specific provider with `LLM_PROVIDER=anthropic|openai|mock`.
 Run the scenario suite:
 
 ```bash
-pytest -q          # 79 tests, ~0.6s, no network
+pytest -q          # 103 tests, ~0.4s, no network
 ```
 
 ### What the LLM does, and what it is not allowed to do
@@ -61,6 +61,7 @@ schema, and the orchestrator executes them in a loop. What is deliberate is how
 | Whether to ask a clarifying question | the tool registry (`need_slot`) |
 | Whether two matching orders are ambiguous | the tool registry |
 | Is this return eligible, and for how much | the policy engine |
+| Can this unshipped order be cancelled, and for how much | the policy engine |
 | Does a human have to approve | the policy engine |
 | Answer, or escalate | the retrieval confidence floor |
 
@@ -87,6 +88,7 @@ half of the job a language model is for.
 |---|---|
 | `Where's my order?` → `rich@example.com` | **Multi-turn collection.** No identity is assumed. Two open orders → the agent refuses to guess and asks which. |
 | `I want to return a book, it arrived damaged` → `rich@example.com` → `BK-47110` → `yes` | **Real action.** Policy engine computes eligibility and amount; agent creates an RMA and issues a £18.00 refund. Check `/api/audit`. |
+| `Cancel my order` → `rich@example.com` → **Cancel** | **Cancellation.** The only processing order (BK-48307) gets a Cancel button. The click refunds £22.50 once. A shipped or delivered order gets no button. |
 | `How long does UK delivery take?` | **Grounded answer**, cited `[KB-SHIP-01]`. |
 | `Do you sell audiobooks in Welsh?` | **No coverage → escalation**, not a guess. |
 | `I need a refund` → `sam@example.com` | **Guardrail.** 3 refunds in 90 days trips human review; agent explains why and hands off. |
@@ -195,7 +197,7 @@ implementations, chosen by environment variable:
 | Source | in-process seed data | live REST calls to mockapi.io |
 | Network | none | required |
 | Speed | instant | real latency |
-| Use for | the demo, and all 79 tests | proving the integration is real |
+| Use for | the demo, and all 103 tests | proving the integration is real |
 
 **Set it up:**
 
@@ -455,14 +457,14 @@ app/
   memory.py             working / verified / profile
   prompts.py            system prompt (short, by design)
   llm/                  provider-agnostic LLM interface + 3 providers
-  tools/                registry (slot validation) + 8 tool definitions
+  tools/                registry (slot validation) + 9 tool definitions
   policy/engine.py      deterministic business rules
   backend/              mocked OMS, carrier, payments, KB, ticketing
   static/index.html     chat UI + live execution trace
-tests/test_scenarios.py 19 agent scenario tests
-tests/test_oms.py       10 OMS adapter + failure-mode tests
-tests/test_payments.py  21 Stripe gateway, money and failure-path tests
-tests/test_wire.py       9 egress-log capture and redaction tests
+tests/test_scenarios.py 54 agent scenario tests
+tests/test_oms.py       11 OMS adapter + failure-mode tests
+tests/test_payments.py  28 Stripe gateway, money and failure-path tests
+tests/test_wire.py      10 egress-log capture and redaction tests
 scripts/seed_stripe.py  create one Stripe test payment per order
 scripts/reset_demo.py   put the demo back to its starting state
 scripts/doctor.py       preflight every system before you record
@@ -474,7 +476,7 @@ scripts/seed_mockapi.py seed and verify a live mockapi.io project
 - Identity is verified by email alone. Real deployments need a magic link or an
   OTP; the seam is `identify_customer` and nothing else changes.
 - `NOW` is frozen at 2026-09-07 so refund windows and the demo stay deterministic.
-- Retrieval is lexical over six passages. Production is hybrid dense + lexical
+- Retrieval is lexical over seven passages. Production is hybrid dense + lexical
   with a reranker; the interface (`search(q) -> passages | []` with a floor) is
   unchanged.
 - Sessions are in-process. Production needs Redis or equivalent, since `verified`
