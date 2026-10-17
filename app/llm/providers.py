@@ -177,6 +177,24 @@ class MockProvider:
                     "this order", "that order", "i ordered", "i bought", "my book",
                     "where is it", "where's it", "track")
 
+    def _wants_cancel(self, text: str) -> bool:
+        """A request to cancel an order, as opposed to a question about the rule.
+
+        Policy questions are routed earlier, while they name no particular order.
+        "Cancel my order" still has to win over the status words inside "my order",
+        or the customer is asked for a number from their confirmation email.
+        """
+        if "cancel" not in text:
+            return False
+        if any(w in text for w in self.SPECIFIC_REF) or ORDER_RE.search(text):
+            return True
+        if text.endswith("?"):
+            return False
+        return any(w in text for w in (
+            "cancel my", "cancel the", "cancel this", "please cancel",
+            "want to cancel", "need to cancel",
+        ))
+
     def complete(self, system, messages, tools) -> LLMResponse:
         last = messages[-1] if messages else {}
 
@@ -204,6 +222,11 @@ class MockProvider:
             reason = ("damaged on arrival" if "damag" in history
                       else "not as expected" if "expect" in history else "customer changed mind")
             return _call("create_return", order_id=oid, sku=sku, reason=reason)
+
+        # The Cancel button sends "Cancel order BK-48307" back through chat.
+        confirmed = re.fullmatch(r"cancel order bk-(\d{5})", text.strip())
+        if confirmed and verified_email:
+            return _call("cancel_order", order_id=f"BK-{confirmed.group(1)}")
 
         email = EMAIL_RE.search(last.get("content") or "")
 
@@ -235,6 +258,24 @@ class MockProvider:
         # An email in the message is otherwise identity resolution.
         if email and not verified_email:
             return _call("identify_customer", email=email.group(0))
+
+        if self._wants_cancel(text):
+            if not verified_email:
+                return _say("I can cancel an order that hasn't shipped yet. "
+                            "What's the email address on the account?")
+            named = ORDER_RE.search(last.get("content") or "")
+            if named:
+                return _call("cancel_order", order_id=f"BK-{named.group(1)}")
+            return _call("cancel_order")
+
+        # "Yes" after a cancel offer re-shows the button. It is not the click,
+        # so it must not write. The return confirmation above still wins when
+        # a return was the thing they were agreeing to.
+        if (re.match(r"^\s*(yes|yep|yeah|please do|go ahead|ok|okay|sure|do it)\b", text)
+                and "cancel_code: cancel_allowed" in system):
+            focus = re.search(r"focus_order: (\S+)", system)
+            if focus:
+                return _call("cancel_order", order_id=focus.group(1))
 
         wants_return = any(w in text for w in self.RETURN_WORDS)
         wants_status = any(w in text for w in self.STATUS_WORDS)
@@ -282,6 +323,11 @@ class MockProvider:
             if status == "not_found":
                 return _say("I can't find an account on that address. Could you check the "
                             "email on your order confirmation and try again?")
+            if self._wants_cancel(user_text):
+                named = ORDER_RE.search(user_text)
+                if named:
+                    return _call("cancel_order", order_id=f"BK-{named.group(1)}")
+                return _call("cancel_order")
             nm = res["customer"]["name"].split()[0]
             wants_return = any(w in user_text for w in self.RETURN_WORDS)
             return _call("list_my_orders", open_only=not wants_return)
@@ -347,6 +393,38 @@ class MockProvider:
                         f"{res['label_url']}. The refund needs a quick sign-off from a "
                         "colleague, who'll confirm by email today.")
 
+        if name == "cancel_order":
+            if status == "forbidden":
+                return _say(res.get("prompt") or "I can't find that order on your account.")
+            if status == "ambiguous":
+                return _say(res.get("prompt") or "Which of those orders should I cancel?")
+            if res.get("refund_error"):
+                return _call(
+                    "escalate_to_human",
+                    reason="repeated_failure",
+                    summary=f"Cancellation refund failed: {res['refund_error']}",
+                )
+            refund = res.get("refund")
+            oid = res.get("order_id", "The order")
+            if refund and status == "ok":
+                return _say(
+                    f"Done. {oid} is cancelled and I've refunded £{refund['amount_gbp']:.2f}. "
+                    f"It'll be back on your card within {refund['expected_in_account_days']} "
+                    "working days."
+                )
+            if refund:
+                return _say(
+                    f"The refund of £{refund['amount_gbp']:.2f} is on its way, but I couldn't "
+                    "update the order status. A colleague will confirm the cancellation."
+                )
+            decision = res.get("decision") or {}
+            if decision.get("allowed"):
+                return _say(
+                    f"{decision['reason']} Use Cancel and I'll refund the full order total."
+                )
+            return _say(decision.get("reason") or res.get("prompt")
+                        or "I can't cancel that order.")
+
         if name == "search_policy":
             if status == "no_grounding":
                 return _call("escalate_to_human", reason="policy_gap",
@@ -366,6 +444,9 @@ class MockProvider:
             for m in reversed(messages):
                 if m.get("role") != "tool":
                     continue
+                if m.get("name") == "cancel_order" and (m.get("content") or {}).get("refund_error"):
+                    preface = "I wasn't able to cancel that order or put the refund through. "
+                    break
                 # A refund that failed at the processor outranks anything the
                 # eligibility check said - it was eligible, that is the point.
                 if m.get("name") == "create_return" and (m.get("content") or {}).get("refund_error"):

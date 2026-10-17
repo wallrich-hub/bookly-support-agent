@@ -14,14 +14,19 @@ security and CX teams actually ask about:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from .llm.base import LLMResponse
 from .llm.providers import get_provider
 from .memory import Session
+from .policy.engine import action_for_cancel
 from .prompts import system_prompt
 from .tools.definitions import build_registry
+
+# A permission. Legal in a reply only when this turn's actions include Cancel.
+_CAN_BE_CANCELLED = re.compile(r"\bcan be cancelled\b", re.I)
 
 MAX_STEPS = 6  # tool calls per user turn
 
@@ -32,6 +37,9 @@ class Turn:
     trace: list[dict[str, Any]] = field(default_factory=list)
     citations: list[str] = field(default_factory=list)
     escalated: bool = False
+    # Server-computed from policy. The front end renders these and sends
+    # `message` back through chat. It never decides that a click is allowed.
+    actions: list[dict[str, Any]] = field(default_factory=list)
 
 
 class Orchestrator:
@@ -59,10 +67,7 @@ class Orchestrator:
                 reply = response.text or (
                     "Sorry — I lost my thread there. Could you say that again?"
                 )
-                session.add("assistant", reply)
-                return Turn(reply=reply, trace=trace,
-                            citations=list(dict.fromkeys(session.turn_citations)),
-                            escalated=session.escalated)
+                return self._finish(session, reply, trace)
 
             # Record the model's intent, then execute each call through the
             # registry, which validates slots and injects trusted identity.
@@ -110,8 +115,53 @@ class Orchestrator:
             f"I've passed this to a colleague (ref {fallback.get('ticket_id','pending')}) "
             "with everything we've discussed."
         )
+        return self._finish(session, reply, trace)
+
+    def _finish(self, session: Session, reply: str, trace: list[dict[str, Any]]) -> Turn:
+        actions = _actions_from_trace(trace)
+        reply = _bind_cancel_claim(reply, actions)
         session.add("assistant", reply)
-        return Turn(reply=reply, trace=trace, escalated=True)
+        return Turn(
+            reply=reply,
+            trace=trace,
+            citations=list(dict.fromkeys(session.turn_citations)),
+            escalated=session.escalated,
+            actions=actions,
+        )
+
+
+def _actions_from_trace(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Cancel is offered only from an allowed policy decision in this turn."""
+    actions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for step in trace:
+        for decision in _decisions(step.get("result")):
+            action = action_for_cancel(decision)
+            if action is None or action["order_id"] in seen:
+                continue
+            seen.add(action["order_id"])
+            actions.append(action)
+    return actions
+
+
+def _decisions(payload: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        if {"allowed", "code", "reason"} <= payload.keys():
+            found.append(payload)
+        for value in payload.values():
+            found.extend(_decisions(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            found.extend(_decisions(item))
+    return found
+
+
+def _bind_cancel_claim(reply: str, actions: list[dict[str, Any]]) -> str:
+    """Drop the permission if this response is not carrying the button."""
+    if any(action.get("id") == "cancel" for action in actions):
+        return reply
+    return _CAN_BE_CANCELLED.sub("cannot be cancelled", reply)
 
 
 def _redact(result: dict[str, Any]) -> dict[str, Any]:
