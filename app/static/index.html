@@ -35,11 +35,23 @@
   button{background:var(--accent);color:#06101f;border:0;padding:11px 20px;
          border-radius:var(--radius);font:inherit;font-weight:600;cursor:pointer}
   button:disabled{opacity:.45;cursor:default}
-  .actions{align-self:flex-start;display:flex;gap:8px;flex-wrap:wrap;margin-top:-6px}
-  .action{background:transparent;color:var(--ink);border:1px solid var(--warn);
-          padding:8px 14px;border-radius:999px;font:inherit;font-weight:600;cursor:pointer}
-  .action:hover{border-color:var(--ink);color:var(--ink)}
-  .action:disabled{opacity:.45;cursor:default}
+  .order-card{align-self:flex-start;width:min(440px,76%);background:var(--panel);
+              border:1px solid var(--line);border-left:3px solid var(--accent);
+              border-radius:var(--radius);padding:12px 14px;display:flex;
+              align-items:center;gap:16px;margin-top:-6px}
+  .order-card .meta{flex:1;min-width:0}
+  .order-card .oid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+                   font-size:12.5px;font-weight:600;letter-spacing:.01em}
+  .order-card .titles{color:var(--dim);font-size:13px;margin-top:2px}
+  .order-card .action{background:var(--accent);color:#06101f;border:0;padding:8px 14px;
+                      border-radius:10px;font:inherit;font-weight:600;cursor:pointer;
+                      flex-shrink:0}
+  .order-card .action:hover{filter:brightness(1.08)}
+  .order-card .action:disabled{opacity:.45;cursor:default;filter:none}
+  @media(max-width:520px){
+    .order-card{width:100%;flex-wrap:wrap}
+    .order-card .action{margin-left:auto}
+  }
   #reset{background:transparent;color:var(--dim);border:1px solid var(--line);
          padding:4px 11px;border-radius:999px;font-size:11px;font-weight:500}
   #reset:hover{color:var(--ink);border-color:var(--dim)}
@@ -214,19 +226,22 @@ function renderCalls(calls){
 let turnNo = 0, httpCalls = 0;
 
 function renderActions(actions){
-  document.querySelectorAll('.actions').forEach(n=>n.remove());
+  document.querySelectorAll('.order-card').forEach(n=>n.remove());
   if(!actions || !actions.length) return;
-  const row=document.createElement('div');
-  row.className='actions';
   actions.forEach(a=>{
+    const titles=Array.isArray(a.titles)?a.titles.filter(Boolean):[];
+    const card=document.createElement('div');
+    card.className='order-card';
+    card.innerHTML='<div class="meta"><div class="oid">'+esc(a.order_id||'')+'</div>'
+      +'<div class="titles">'+esc(titles.join(' · '))+'</div></div>';
     const b=document.createElement('button');
     b.type='button';
     b.className='action';
     b.innerHTML=esc(a.label||'Cancel');
     b.addEventListener('click', ()=>sendMessage(a.message));
-    row.appendChild(b);
+    card.appendChild(b);
+    log.appendChild(card);
   });
-  log.appendChild(row);
   log.scrollTop=log.scrollHeight;
 }
 
@@ -262,7 +277,7 @@ function render(data){
 
 async function sendMessage(msg){
   if(!msg) return;
-  document.querySelectorAll('.actions button').forEach(b=>{ b.disabled=true; });
+  document.querySelectorAll('.order-card button').forEach(b=>{ b.disabled=true; });
   bubble(msg,'user'); btn.disabled=true;
   const thinking=bubble('…','bot');
   try{

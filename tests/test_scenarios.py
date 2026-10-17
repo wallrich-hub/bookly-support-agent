@@ -452,6 +452,7 @@ def test_cancel_offers_an_action_then_refunds_the_total_once(agent):
     assert "cancel_order" in tools_used(offer)
     assert offer.actions and offer.actions[0]["label"] == "Cancel"
     assert offer.actions[0]["order_id"] == "BK-48307"
+    assert offer.actions[0]["titles"] == ["The Overstory"]
     assert "can be cancelled" in offer.reply.lower()
     assert "confirmation email" not in offer.reply.lower()
     assert "order number" not in offer.reply.lower()
@@ -473,6 +474,26 @@ def test_cancel_offers_an_action_then_refunds_the_total_once(agent):
     assert len(data.REFUNDS) == 1, "a second click must not refund again"
     assert "can be cancelled" not in again.reply.lower()
     assert not any(a.get("id") == "cancel" for a in again.actions)
+
+
+def test_cancel_action_lists_every_title_on_the_order():
+    order = {
+        "order_id": "BK-10001",
+        "customer_id": "cus_1001",
+        "status": "processing",
+        "total_gbp": "30.00",
+        "items": [
+            {"title": "The Overstory"},
+            {"title": "Piranesi"},
+            {"title": ""},
+        ],
+    }
+    action = engine.action_for_cancel(
+        engine.evaluate_cancel(order, "cus_1001").to_dict()
+    )
+    assert action["order_id"] == "BK-10001"
+    assert action["titles"] == ["The Overstory", "Piranesi"]
+    assert action["label"] == "Cancel"
 
 
 def test_unverified_cancel_asks_for_email_not_an_order_number(agent):
@@ -580,5 +601,6 @@ def test_chat_api_returns_the_cancel_action(monkeypatch):
     offered = second.json()
     assert offered["actions"][0]["label"] == "Cancel"
     assert offered["actions"][0]["order_id"] == "BK-48307"
+    assert offered["actions"][0]["titles"] == ["The Overstory"]
     assert "can be cancelled" in offered["reply"].lower()
     assert "confirmation email" not in offered["reply"].lower()

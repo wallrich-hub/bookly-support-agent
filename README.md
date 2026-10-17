@@ -46,7 +46,7 @@ Force a specific provider with `LLM_PROVIDER=anthropic|openai|mock`.
 Run the scenario suite:
 
 ```bash
-pytest -q          # 103 tests, ~0.4s, no network
+pytest -q          # 104 tests, ~0.4s, no network
 ```
 
 ### What the LLM does, and what it is not allowed to do
@@ -197,7 +197,7 @@ implementations, chosen by environment variable:
 | Source | in-process seed data | live REST calls to mockapi.io |
 | Network | none | required |
 | Speed | instant | real latency |
-| Use for | the demo, and all 103 tests | proving the integration is real |
+| Use for | the demo, and all 104 tests | proving the integration is real |
 
 **Set it up:**
 
@@ -461,7 +461,7 @@ app/
   policy/engine.py      deterministic business rules
   backend/              mocked OMS, carrier, payments, KB, ticketing
   static/index.html     chat UI + live execution trace
-tests/test_scenarios.py 54 agent scenario tests
+tests/test_scenarios.py 55 agent scenario tests
 tests/test_oms.py       11 OMS adapter + failure-mode tests
 tests/test_payments.py  28 Stripe gateway, money and failure-path tests
 tests/test_wire.py      10 egress-log capture and redaction tests

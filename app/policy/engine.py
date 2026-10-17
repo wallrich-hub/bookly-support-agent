@@ -192,13 +192,16 @@ def action_for_cancel(decision: dict) -> dict | None:
     """The Cancel button, present only for an allowed cancellation decision."""
     if not decision.get("allowed") or decision.get("code") != "cancel_allowed":
         return None
-    order_id = (decision.get("facts") or {}).get("order_id")
+    facts = decision.get("facts") or {}
+    order_id = facts.get("order_id")
     if not order_id:
         return None
+    titles = [t for t in (facts.get("titles") or []) if t]
     return {
         "id": "cancel",
         "label": "Cancel",
         "order_id": order_id,
+        "titles": titles,
         "message": cancel_confirmation(order_id),
     }
 
@@ -248,6 +251,7 @@ def evaluate_cancel(order: dict, customer_id: str) -> Decision:
         )
 
     amount = from_minor_units(to_minor_units(refund_for_total(order["total_gbp"])))
+    titles = [item["title"] for item in order.get("items") or [] if item.get("title")]
     return Decision(
         allowed=True,
         code="cancel_allowed",
@@ -255,6 +259,7 @@ def evaluate_cancel(order: dict, customer_id: str) -> Decision:
         facts={
             "refund_amount_gbp": amount,
             "order_id": order["order_id"],
+            "titles": titles,
             "kb_ref": kb.CANCELLATION,
         },
     )
