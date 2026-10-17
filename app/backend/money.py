@@ -29,3 +29,17 @@ def from_minor_units(minor: int, currency: str = "gbp") -> float:
     if currency.lower() in ZERO_DECIMAL:
         return float(minor)
     return float(Decimal(minor) / 100)
+
+
+def refund_for_total(total: float | str | Decimal, currency: str = "gbp") -> Decimal:
+    """The amount a cancellation refunds: the order total, quantized to the currency.
+
+    Cancellation returns what the customer paid, not a figure the model names.
+    `Decimal(str(total))` is deliberate. `str(22.50)` is `"22.5"`, and
+    `Decimal("22.5")` is exact; `Decimal(22.50)` would already be the binary
+    approximation. Quantizing then happens in decimal, never in float.
+    """
+    value = Decimal(str(total))
+    if currency.lower() in ZERO_DECIMAL:
+        return value.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)

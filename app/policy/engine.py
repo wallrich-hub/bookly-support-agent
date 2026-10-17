@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..backend import clock, kb
+from ..backend.money import from_minor_units, refund_for_total, to_minor_units
 
 
 def normalise_sku(value: Any) -> str:
@@ -97,14 +98,34 @@ def evaluate_return(order: dict, customer: dict, sku: str) -> Decision:
         )
 
     if order["status"] != "delivered":
+        # "It can be cancelled" is a permission. Say it only when evaluate_cancel
+        # actually allows it, so a shipped order is not promised a button we
+        # will not render. The orchestrator attaches that button from the
+        # nested decision; the sentence and the action stay together.
+        owner_id = customer.get("customer_id")
+        cancel = evaluate_cancel(order, owner_id) if owner_id else None
+        if cancel is not None and cancel.allowed:
+            return Decision(
+                allowed=False,
+                code="not_yet_delivered",
+                reason=(
+                    f"Order {order['order_id']} is {order['status']}, not delivered. "
+                    "A return cannot start until the order arrives; it can be cancelled instead."
+                ),
+                facts={
+                    "order_status": order["status"],
+                    "order_id": order["order_id"],
+                    "cancel": cancel.to_dict(),
+                },
+            )
         return Decision(
             allowed=False,
             code="not_yet_delivered",
             reason=(
                 f"Order {order['order_id']} is {order['status']}, not delivered. "
-                "A return cannot start until the order arrives; it can be cancelled instead."
+                "A return cannot start until the order arrives."
             ),
-            facts={"order_status": order["status"]},
+            facts={"order_status": order["status"], "order_id": order["order_id"]},
         )
 
     window = RETURN_WINDOW_DAYS[customer.get("tier", "standard")]
@@ -158,6 +179,88 @@ def evaluate_return(order: dict, customer: dict, sku: str) -> Decision:
             "window_days": window,
             "title": line["title"],
             "kb_ref": kb.RETURNS_WINDOW,
+        },
+    )
+
+
+def cancel_confirmation(order_id: str) -> str:
+    """The chat message a Cancel click sends. The tool treats this as the write."""
+    return f"Cancel order {order_id}"
+
+
+def action_for_cancel(decision: dict) -> dict | None:
+    """The Cancel button, present only for an allowed cancellation decision."""
+    if not decision.get("allowed") or decision.get("code") != "cancel_allowed":
+        return None
+    facts = decision.get("facts") or {}
+    order_id = facts.get("order_id")
+    if not order_id:
+        return None
+    titles = [t for t in (facts.get("titles") or []) if t]
+    return {
+        "id": "cancel",
+        "label": "Cancel",
+        "order_id": order_id,
+        "titles": titles,
+        "message": cancel_confirmation(order_id),
+    }
+
+
+def evaluate_cancel(order: dict, customer_id: str) -> Decision:
+    """May this order be cancelled, and for how much?
+
+    Allowed only when it has not shipped and it belongs to `customer_id`.
+    That id is the verified session, never a value the model supplied.
+    The refund is the order total, derived in Decimal. The return ceiling
+    does not apply: the customer is getting back what they paid for a book
+    that has not left the warehouse.
+    """
+    if not customer_id or order.get("customer_id") != customer_id:
+        return Decision(
+            allowed=False,
+            code="not_owner",
+            reason="That order is not on this customer's account.",
+        )
+
+    status = order.get("status")
+    if status != "processing":
+        code = {
+            "shipped": "already_shipped",
+            "delivered": "already_delivered",
+            "cancelled": "already_cancelled",
+        }.get(status, "not_cancellable")
+        if status == "cancelled":
+            reason = f"Order {order['order_id']} is already cancelled."
+        elif status == "delivered":
+            reason = (
+                f"Order {order['order_id']} has been delivered, so cancellation isn't available."
+            )
+        elif status == "shipped":
+            reason = (
+                f"Order {order['order_id']} has already shipped, so cancellation isn't available."
+            )
+        else:
+            reason = (
+                f"Order {order['order_id']} is {status}, so cancellation isn't available."
+            )
+        return Decision(
+            allowed=False,
+            code=code,
+            reason=reason,
+            facts={"order_status": status, "order_id": order.get("order_id")},
+        )
+
+    amount = from_minor_units(to_minor_units(refund_for_total(order["total_gbp"])))
+    titles = [item["title"] for item in order.get("items") or [] if item.get("title")]
+    return Decision(
+        allowed=True,
+        code="cancel_allowed",
+        reason=f"Order {order['order_id']} has not shipped, so it can be cancelled.",
+        facts={
+            "refund_amount_gbp": amount,
+            "order_id": order["order_id"],
+            "titles": titles,
+            "kb_ref": kb.CANCELLATION,
         },
     )
 

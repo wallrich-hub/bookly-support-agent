@@ -46,6 +46,10 @@ class Tool:
     # Slots the model may never supply itself; they are injected from verified
     # session state. Stops "I'm customer cus_1002" style identity spoofing.
     server_supplied: list[str] = field(default_factory=list)
+    # Optional per-tool wording when a slot is missing or malformed. Falls
+    # back to SLOT_PROMPTS. Cancel must not reuse the returns prompt that
+    # sends the customer hunting through a confirmation email.
+    slot_prompts: dict[str, str] = field(default_factory=dict)
 
     def to_schema(self) -> dict[str, Any]:
         return {
@@ -104,7 +108,7 @@ class Registry:
                 "missing": missing,
                 "prompt": (
                     "Do not call this tool yet. Ask the customer for "
-                    + " and ".join(SLOT_PROMPTS.get(s, s) for s in missing)
+                    + " and ".join(self._slot_prompt(tool, s) for s in missing)
                     + ". Ask for it naturally, in one short question."
                 ),
             }
@@ -123,7 +127,13 @@ class Registry:
                 args[slot] = value.strip().lower() in ("true", "yes", "1")
 
         # 4. Format validation -> repair question rather than a 404.
+        #    A blank optional slot is "not supplied", not "supplied wrong".
+        #    Validating it forces the order-number prompt on a cancel the
+        #    customer has not named an order for.
         for slot, value in list(args.items()):
+            if slot not in tool.required_slots and value in (None, "", "unknown", "null"):
+                args.pop(slot, None)
+                continue
             validator = VALIDATORS.get(slot)
             if validator and not validator(value):
                 return {
@@ -131,7 +141,7 @@ class Registry:
                     "slot": slot,
                     "prompt": (
                         f"'{value}' is not a valid {slot}. Ask the customer to "
-                        f"confirm {SLOT_PROMPTS.get(slot, slot)}."
+                        f"confirm {self._slot_prompt(tool, slot)}."
                     ),
                 }
 
@@ -152,3 +162,7 @@ class Registry:
         result["calls"] = wire.drain()
         session.tool_calls.append({"tool": name, "args": args, "status": result["status"]})
         return result
+
+    @staticmethod
+    def _slot_prompt(tool: Tool, slot: str) -> str:
+        return tool.slot_prompts.get(slot) or SLOT_PROMPTS.get(slot, slot)

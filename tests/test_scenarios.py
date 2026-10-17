@@ -28,7 +28,9 @@ def agent():
 def clean_ledgers():
     data.RETURNS.clear(); data.REFUNDS.clear()
     data.ESCALATIONS.clear(); data.AUDIT_LOG.clear()
+    data.CANCELLATIONS.clear()
     yield
+    data.CANCELLATIONS.clear()
 
 
 def tools_used(turn):
@@ -138,9 +140,14 @@ def test_every_cited_id_exists_in_the_knowledge_base():
         engine.evaluate_return(order("EBOOK-1", 2), customer, "EBOOK-1"),  # non_returnable
         engine.evaluate_return(order("BK-1", 2), customer, "BK-1"),        # eligible_auto
         engine.evaluate_return(order("BK-1", 400), customer, "BK-1"),      # outside_window
+        engine.evaluate_cancel(
+            {"order_id": "BK-48307", "customer_id": "cus_1001",
+             "status": "processing", "total_gbp": "22.50"},
+            "cus_1001",
+        ),
     ]
     assert {d.code for d in decisions} == {
-        "non_returnable_category", "eligible_auto", "outside_window"
+        "non_returnable_category", "eligible_auto", "outside_window", "cancel_allowed",
     }
 
     refs = [d.facts["kb_ref"] for d in decisions if "kb_ref" in d.facts]
@@ -172,6 +179,7 @@ def test_citation_badge_does_not_leak_between_turns(agent):
     "What happens if my parcel is lost?",
     "How long is the password reset link valid?",
     "When will a refund reach my card?",
+    "What is your cancellation policy?",
 ])
 def test_citation_follows_the_question_not_the_code_path(agent, question):
     """Different policy questions must cite different chunks.
@@ -193,6 +201,7 @@ def test_citation_follows_the_question_not_the_code_path(agent, question):
     "Where's my order?",
     "I want to return a book, it arrived damaged",
     "I'm locked out of my account",
+    "I want to cancel my order",
 ])
 def test_transactional_requests_are_not_diverted_into_retrieval(agent, message):
     """The converse guard: routing policy questions to the KB must not swallow
@@ -423,3 +432,175 @@ def test_dotenv_is_read_but_never_overrides_the_real_environment(tmp_path, monke
 def test_a_missing_dotenv_is_not_an_error(tmp_path):
     from app.env import load
     assert load(tmp_path / "nope.env") == {}
+
+
+# --- Cancellation: a button the policy engine actually allows --------------
+
+def _rich(session=None):
+    s = session or Session()
+    s.verify(customer_id="cus_1001", customer_name="Rich Wall",
+             tier="plus", email="rich@example.com")
+    s.profile = data.CUSTOMERS["cus_1001"]
+    return s
+
+
+def test_cancel_offers_an_action_then_refunds_the_total_once(agent):
+    """BK-48307 is the only processing order. No confirmation-email hunt."""
+    s = _rich()
+    offer = agent.handle(s, "Please cancel my order")
+
+    assert "cancel_order" in tools_used(offer)
+    assert offer.actions and offer.actions[0]["label"] == "Cancel"
+    assert offer.actions[0]["order_id"] == "BK-48307"
+    assert offer.actions[0]["titles"] == ["The Overstory"]
+    assert "can be cancelled" in offer.reply.lower()
+    assert "confirmation email" not in offer.reply.lower()
+    assert "order number" not in offer.reply.lower()
+    assert not data.REFUNDS, "the offer must not move money"
+
+    click = offer.actions[0]["message"]
+    done = agent.handle(s, click)
+    assert "cancel_order" in tools_used(done)
+    assert len(data.REFUNDS) == 1
+    refund = next(iter(data.REFUNDS.values()))
+    assert refund["amount_gbp"] == data.ORDERS["BK-48307"]["total_gbp"]
+    assert refund["rma"] == "CANCEL-BK-48307"
+    assert data.CANCELLATIONS["BK-48307"]["status"] == "cancelled"
+    assert any(entry["action"] == "cancel_order" and entry["result"] == "cancelled"
+               for entry in data.AUDIT_LOG)
+    assert any(entry["action"] == "issue_refund" for entry in data.AUDIT_LOG)
+
+    again = agent.handle(s, click)
+    assert len(data.REFUNDS) == 1, "a second click must not refund again"
+    assert "can be cancelled" not in again.reply.lower()
+    assert not any(a.get("id") == "cancel" for a in again.actions)
+
+
+def test_cancel_action_lists_every_title_on_the_order():
+    order = {
+        "order_id": "BK-10001",
+        "customer_id": "cus_1001",
+        "status": "processing",
+        "total_gbp": "30.00",
+        "items": [
+            {"title": "The Overstory"},
+            {"title": "Piranesi"},
+            {"title": ""},
+        ],
+    }
+    action = engine.action_for_cancel(
+        engine.evaluate_cancel(order, "cus_1001").to_dict()
+    )
+    assert action["order_id"] == "BK-10001"
+    assert action["titles"] == ["The Overstory", "Piranesi"]
+    assert action["label"] == "Cancel"
+
+
+def test_unverified_cancel_asks_for_email_not_an_order_number(agent):
+    t = agent.handle(Session(), "I want to cancel my order")
+    assert "email" in t.reply.lower()
+    assert "order number" not in t.reply.lower()
+    assert "confirmation email" not in t.reply.lower()
+    assert t.actions == []
+
+
+@pytest.mark.parametrize("order_id", ["BK-48291", "BK-47110"])
+def test_shipped_or_delivered_order_cannot_be_cancelled(agent, order_id):
+    s = _rich()
+    t = agent.handle(s, f"Please cancel {order_id}")
+    assert not any(a.get("id") == "cancel" for a in t.actions)
+    assert "can be cancelled" not in t.reply.lower()
+    assert not data.REFUNDS
+    assert order_id not in data.CANCELLATIONS
+
+
+def test_return_of_a_shipped_order_does_not_promise_cancellation(agent):
+    s = _rich()
+    t = agent.handle(s, "I want to return BK-48291")
+    assert "can be cancelled" not in t.reply.lower()
+    assert not any(a.get("id") == "cancel" for a in t.actions)
+
+
+def test_return_of_a_processing_order_offers_cancel_with_the_words(agent):
+    s = _rich()
+    t = agent.handle(s, "I want to return BK-48307")
+    assert "can be cancelled" in t.reply.lower()
+    assert any(a["order_id"] == "BK-48307" for a in t.actions)
+
+
+def test_another_customers_order_cannot_be_cancelled(agent):
+    s = Session()
+    s.verify(customer_id="cus_1002", email="sam@example.com")
+    s.profile = data.CUSTOMERS["cus_1002"]
+    s.add("user", "Cancel order BK-48307")
+    result = agent.registry.execute(
+        "cancel_order",
+        {"order_id": "BK-48307", "customer_id": "cus_1001", "amount_gbp": 500},
+        s,
+    )
+    assert result["status"] == "forbidden"
+    assert not data.REFUNDS
+    assert "BK-48307" not in data.CANCELLATIONS
+
+    spoken = agent.handle(s, "Cancel order BK-48307")
+    assert "can be cancelled" not in spoken.reply.lower()
+    assert not any(a.get("id") == "cancel" for a in spoken.actions)
+    assert not data.REFUNDS
+
+
+def test_cancel_ignores_an_amount_named_by_the_model(agent):
+    s = _rich()
+    s.add("user", "Cancel order BK-48307")
+    result = agent.registry.execute(
+        "cancel_order",
+        {"order_id": "BK-48307", "amount_gbp": 500, "customer_id": "cus_1002"},
+        s,
+    )
+    assert result["status"] == "ok"
+    assert result["refund"]["amount_gbp"] == 22.50
+    schema = next(t for t in agent.registry.schemas() if t["name"] == "cancel_order")
+    assert "amount" not in schema["input_schema"]["properties"]
+    assert "amount_gbp" not in schema["input_schema"]["properties"]
+    assert "customer_id" not in schema["input_schema"]["properties"]
+
+
+def test_a_failed_cancel_refund_is_not_retried(agent, monkeypatch):
+    from app.backend.payments import PaymentError, get_gateway
+
+    calls = {"n": 0}
+
+    def fail(**kwargs):
+        calls["n"] += 1
+        raise PaymentError("timeout")
+
+    monkeypatch.setattr(get_gateway(), "refund", fail)
+    s = _rich()
+    agent.handle(s, "Please cancel my order")
+    t = agent.handle(s, "Cancel order BK-48307")
+    assert calls["n"] == 1
+    assert not data.REFUNDS
+    assert "BK-48307" not in data.CANCELLATIONS
+    assert "can be cancelled" not in t.reply.lower()
+    assert "escalate_to_human" in tools_used(t)
+
+
+def test_chat_api_returns_the_cancel_action(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    monkeypatch.setattr(main, "agent", Orchestrator("mock"))
+    client = TestClient(main.app)
+    first = client.post("/api/chat", json={"message": "Please cancel my order"})
+    assert first.status_code == 200
+    body = first.json()
+    assert body["actions"] == []
+    second = client.post("/api/chat", json={
+        "message": "rich@example.com", "session_id": body["session_id"],
+    })
+    offered = second.json()
+    assert offered["actions"][0]["label"] == "Cancel"
+    assert offered["actions"][0]["order_id"] == "BK-48307"
+    assert offered["actions"][0]["titles"] == ["The Overstory"]
+    assert "can be cancelled" in offered["reply"].lower()
+    assert "confirmation email" not in offered["reply"].lower()
