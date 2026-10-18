@@ -1,4 +1,4 @@
-"""The eight tools the model is allowed to call.
+"""The nine tools the model is allowed to call.
 
 Note the asymmetry with app/backend/bookly_api.py. The Bookly systems expose
 generic CRUD; the model gets a narrower, intent-shaped surface:
@@ -235,6 +235,184 @@ def _reset_password(session, email: str) -> dict[str, Any]:
     }
 
 
+def _cancel_confirmed(session, order_id: str) -> bool:
+    """True only when the customer's latest message is the Cancel click.
+
+    The model can call this tool whenever it likes. The write waits for the
+    message the server put on the action, which a click sends back through chat.
+    """
+    expected = engine.cancel_confirmation(order_id)
+    for message in reversed(session.working):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            return False
+        return content.strip() == expected
+    return False
+
+
+def _refund_view(refund: dict) -> dict[str, Any]:
+    return {
+        "refund_id": refund["refund_id"],
+        "amount_gbp": refund["amount_gbp"],
+        "expected_in_account_days": refund["expected_in_account_days"],
+        "provider": refund["provider"],
+    }
+
+
+def _forbid_order() -> dict[str, Any]:
+    return {
+        "status": "forbidden",
+        "prompt": (
+            "That order is not on this customer's account. Say you cannot find "
+            "it on their account and offer to check another number. Reveal nothing else."
+        ),
+    }
+
+
+def _cancel_order(session, customer_id: str, order_id: str | None = None, **_extra) -> dict[str, Any]:
+    """Cancel one unshipped order and refund its total.
+
+    `_extra` absorbs an amount or a customer id if a model invents one.
+    Neither is read. Identity is `customer_id` from the session; the amount
+    is re-derived from the order at write time.
+    """
+    named = (order_id or "").strip()
+    if named.lower() in ("", "unknown", "null", "none"):
+        named = ""
+
+    if named:
+        got = api.get_order(named)
+        if not got["ok"]:
+            return {
+                "status": "not_found",
+                "prompt": "That order number isn't in our system. Ask them to re-check it.",
+            }
+        order = got["data"]
+        if order["customer_id"] != customer_id:
+            return _forbid_order()
+    else:
+        processing = [
+            row for row in api.list_orders(customer_id)["data"]
+            if row.get("status") == "processing"
+        ]
+        if len(processing) == 1:
+            order = processing[0]
+        elif not processing:
+            decision = engine.Decision(
+                allowed=False,
+                code="nothing_to_cancel",
+                reason="There isn't an unshipped order on this account.",
+            )
+            return {
+                "status": "blocked",
+                "decision": decision.to_dict(),
+                "prompt": (
+                    "Explain that there is nothing to cancel. "
+                    "Do not say an order can be cancelled."
+                ),
+            }
+        else:
+            lines = "; ".join(
+                f"{row['items'][0]['title']} placed {row['placed_at'][:10]}"
+                for row in processing
+            )
+            return {
+                "status": "ambiguous",
+                "prompt": (
+                    "More than one unshipped order. Ask which they mean by title and date: "
+                    f"{lines}. Do not ask them to copy an order number from a confirmation email."
+                ),
+            }
+
+    # Write-time re-read. The copy from a moment ago is not authority to move money.
+    fresh = api.get_order(order["order_id"])
+    if not fresh["ok"]:
+        return {"status": "not_found", "prompt": "That order number isn't in our system."}
+    order = fresh["data"]
+    if order["customer_id"] != customer_id:
+        return _forbid_order()
+
+    decision = engine.evaluate_cancel(order, customer_id)
+    session.verify(focus_order=order["order_id"], cancel_code=decision.code)
+
+    if not decision.allowed or not _cancel_confirmed(session, order["order_id"]):
+        out: dict[str, Any] = {
+            "status": "ok" if decision.allowed else "blocked",
+            "decision": decision.to_dict(),
+            "order_id": order["order_id"],
+        }
+        if decision.allowed:
+            out["prompt"] = (
+                "Allowed. Tell them briefly that it can be cancelled. The Cancel "
+                "action is shown separately. Do not cancel it yourself and do not "
+                "ask them to find an order number."
+            )
+        else:
+            out["prompt"] = (
+                "Not cancellable. Explain the reason in plain language. "
+                "Do not say it can be cancelled."
+            )
+        return out
+
+    amount = decision.facts["refund_amount_gbp"]
+    # Stable key: a second click replays this refund instead of creating one.
+    # issue_refund does not retry the POST; neither does this caller.
+    res = api.issue_refund(
+        order["order_id"],
+        amount,
+        f"CANCEL-{order['order_id']}",
+        payment_intent_id=order.get("payment_intent_id"),
+    )
+    if not res["ok"]:
+        return {
+            "status": "blocked",
+            "refund": None,
+            "refund_error": res["error"]["message"],
+            "order_id": order["order_id"],
+            "prompt": (
+                "The refund failed and the order was NOT cancelled. Tell them a "
+                "colleague needs to finish it. Do not state an amount, a timeframe, "
+                "or that it can be cancelled."
+            ),
+        }
+
+    cancelled = api.cancel_order(order["order_id"])
+    if not cancelled["ok"]:
+        # The money moved once, under the idempotency key. A later confirmed
+        # click calls issue_refund again and gets the same refund back.
+        # The allowed decision stays on the result so that click is still offered,
+        # and cancel_error tells the planner to open a ticket rather than only
+        # promise that a colleague will confirm.
+        return {
+            "status": "blocked",
+            "decision": decision.to_dict(),
+            "refund": _refund_view(res["data"]),
+            "cancel_error": cancelled["error"]["message"],
+            "order_id": order["order_id"],
+            "prompt": (
+                "The refund was issued but the order status did not update. "
+                "The order has not shipped, so it can be cancelled: the Cancel "
+                "action is shown again and a later click replays this same refund. "
+                "Tell them the refund amount and the timing, and that Cancel tries "
+                "the status update again. Do not state a second amount. Then escalate "
+                "so a colleague confirms the cancellation."
+            ),
+        }
+
+    session.verify(cancel_code="cancelled")
+    return {
+        "status": "ok",
+        "order_id": order["order_id"],
+        "refund": _refund_view(res["data"]),
+        "prompt": (
+            "Cancelled and refunded. Give the amount and the timing. Be brief. "
+            "Do not say it can be cancelled — it already is."
+        ),
+    }
+
+
 def _escalate(session, reason: str, summary: str) -> dict[str, Any]:
     session.escalated = True
     ticket = api.create_escalation(
@@ -256,7 +434,7 @@ def build_registry() -> Registry:
     r.register(Tool(
         name="identify_customer",
         description=("Resolve who you are speaking to from their email address. Must be "
-                     "called before any order, return or refund tool."),
+                     "called before any order, return, cancellation or refund tool."),
         parameters={"type": "object", "properties": {
             "email": {"type": "string", "description": "Email address on the account."}},
             "required": ["email"]},
@@ -313,10 +491,34 @@ def build_registry() -> Registry:
     ))
 
     r.register(Tool(
+        name="cancel_order",
+        description=(
+            "Cancel the verified customer's unshipped order and refund the order "
+            "total when policy allows. You cannot name an amount or a customer. "
+            "Omit order_id unless they named one. When the decision is allowed, "
+            "a Cancel action is shown for them; do not cancel until they use it, "
+            "and do not say an order can be cancelled unless the decision allows it."
+        ),
+        parameters={"type": "object", "properties": {
+            "order_id": {
+                "type": "string",
+                "description": "Only if the customer named an order. Otherwise omit.",
+            },
+        }, "required": []},
+        handler=_cancel_order,
+        required_slots=[],
+        server_supplied=["customer_id"],
+        side_effecting=True,
+        slot_prompts={
+            "order_id": "which order they mean, by the title if there is more than one",
+        },
+    ))
+
+    r.register(Tool(
         name="search_policy",
         description=("Retrieve Bookly policy passages. You MUST call this for any question "
-                     "about shipping, returns policy, refunds timing, or accounts, and "
-                     "answer only from what it returns."),
+                     "about shipping, returns policy, cancellation, refunds timing, or "
+                     "accounts, and answer only from what it returns."),
         parameters={"type": "object", "properties": {
             "question": {"type": "string", "description": "The customer's question."}},
             "required": ["question"]},

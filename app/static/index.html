@@ -35,6 +35,23 @@
   button{background:var(--accent);color:#06101f;border:0;padding:11px 20px;
          border-radius:var(--radius);font:inherit;font-weight:600;cursor:pointer}
   button:disabled{opacity:.45;cursor:default}
+  .order-card{align-self:flex-start;width:min(440px,76%);background:var(--panel);
+              border:1px solid var(--line);border-left:3px solid var(--accent);
+              border-radius:var(--radius);padding:12px 14px;display:flex;
+              align-items:center;gap:16px;margin-top:-6px}
+  .order-card .meta{flex:1;min-width:0}
+  .order-card .oid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+                   font-size:12.5px;font-weight:600;letter-spacing:.01em}
+  .order-card .titles{color:var(--dim);font-size:13px;margin-top:2px}
+  .order-card .action{background:var(--accent);color:#06101f;border:0;padding:8px 14px;
+                      border-radius:10px;font:inherit;font-weight:600;cursor:pointer;
+                      flex-shrink:0}
+  .order-card .action:hover{filter:brightness(1.08)}
+  .order-card .action:disabled{opacity:.45;cursor:default;filter:none}
+  @media(max-width:520px){
+    .order-card{width:100%;flex-wrap:wrap}
+    .order-card .action{margin-left:auto}
+  }
   #reset{background:transparent;color:var(--dim);border:1px solid var(--line);
          padding:4px 11px;border-radius:999px;font-size:11px;font-weight:500}
   #reset:hover{color:var(--ink);border-color:var(--dim)}
@@ -110,6 +127,7 @@
       Try:
       <code>Where's my order?</code>
       <code>I want to return a book</code>
+      <code>Cancel my order</code>
       <code>How long does delivery take?</code>
       <code>Do you sell audiobooks in Welsh?</code>
       <br>Test account: <code>rich@example.com</code> · abuse guardrail: <code>sam@example.com</code>
@@ -207,6 +225,26 @@ function renderCalls(calls){
 
 let turnNo = 0, httpCalls = 0;
 
+function renderActions(actions){
+  document.querySelectorAll('.order-card').forEach(n=>n.remove());
+  if(!actions || !actions.length) return;
+  actions.forEach(a=>{
+    const titles=Array.isArray(a.titles)?a.titles.filter(Boolean):[];
+    const card=document.createElement('div');
+    card.className='order-card';
+    card.innerHTML='<div class="meta"><div class="oid">'+esc(a.order_id||'')+'</div>'
+      +'<div class="titles">'+esc(titles.join(' · '))+'</div></div>';
+    const b=document.createElement('button');
+    b.type='button';
+    b.className='action';
+    b.innerHTML=esc(a.label||'Cancel');
+    b.addEventListener('click', ()=>sendMessage(a.message));
+    card.appendChild(b);
+    log.appendChild(card);
+  });
+  log.scrollTop=log.scrollHeight;
+}
+
 function render(data){
   // The trace ACCUMULATES across the conversation rather than resetting each
   // turn — the full call chain is the story, not the last hop of it.
@@ -233,14 +271,14 @@ function render(data){
   const v=data.verified||{};
   const keys=Object.keys(v);
   factsEl.innerHTML = keys.length
-    ? keys.map(k=>'<div class="fact"><b>'+k+'</b>: '+v[k]+'</div>').join('')
+    ? keys.map(k=>'<div class="fact"><b>'+esc(k)+'</b>: '+esc(v[k])+'</div>').join('')
     : '<div class="empty">Nothing established yet.</div>';
 }
 
-form.onsubmit=async e=>{
-  e.preventDefault();
-  const msg=input.value.trim(); if(!msg) return;
-  bubble(msg,'user'); input.value=''; btn.disabled=true;
+async function sendMessage(msg){
+  if(!msg) return;
+  document.querySelectorAll('.order-card button').forEach(b=>{ b.disabled=true; });
+  bubble(msg,'user'); btn.disabled=true;
   const thinking=bubble('…','bot');
   try{
     const r=await fetch('/api/chat',{method:'POST',
@@ -255,8 +293,19 @@ form.onsubmit=async e=>{
       log.appendChild(c);
     }
     render(data);
-  }catch(err){ thinking.textContent='Connection error: '+err.message; }
+    renderActions(data.actions);
+  }catch(err){
+    thinking.textContent='Connection error: '+err.message;
+    document.querySelectorAll('.order-card button').forEach(b=>{ b.disabled=false; });
+  }
   btn.disabled=false; input.focus(); log.scrollTop=log.scrollHeight;
+}
+
+form.onsubmit=e=>{
+  e.preventDefault();
+  const msg=input.value.trim(); if(!msg) return;
+  input.value='';
+  sendMessage(msg);
 };
 </script>
 </body>

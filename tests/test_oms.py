@@ -25,6 +25,7 @@ def restore_oms():
     set_oms(None)
     data.RETURNS.clear(); data.REFUNDS.clear()
     data.ESCALATIONS.clear(); data.AUDIT_LOG.clear()
+    data.CANCELLATIONS.clear()
 
 
 def stub_oms(handler) -> BooklyHttpOMS:
@@ -156,6 +157,42 @@ def test_both_backends_return_the_same_canonical_shape():
 
     assert json.dumps(stub_oms(handler).get_order("BK-47110"), sort_keys=True) == \
            json.dumps(order, sort_keys=True)
+
+
+def test_http_cancel_puts_once_and_does_not_retry():
+    """The status write is one PUT. The refund POST is a different call and
+    is not made here; this test pins the OMS half of that promise."""
+    puts = {"n": 0}
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=[{
+                "id": "9",
+                "order_id": "BK-48307",
+                "customer_id": "cus_1001",
+                "placed_at": "2026-09-01T10:00:00+00:00",
+                "status": "processing",
+                "total_gbp": "22.50",
+                "items": [],
+            }])
+        if request.method == "PUT":
+            puts["n"] += 1
+            assert request.url.path.endswith("/orders/9")
+            return httpx.Response(200, json={
+                "id": "9",
+                "order_id": "BK-48307",
+                "customer_id": "cus_1001",
+                "placed_at": "2026-09-01T10:00:00+00:00",
+                "status": "cancelled",
+                "total_gbp": "22.50",
+                "items": [],
+            })
+        raise AssertionError(request.method)
+
+    order = stub_oms(handler).cancel_order("bk-48307")
+    assert puts["n"] == 1
+    assert order["status"] == "cancelled"
+    assert order["order_id"] == "BK-48307"
 
 
 def test_default_backend_is_in_memory(monkeypatch):

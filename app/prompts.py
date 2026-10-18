@@ -45,7 +45,12 @@ RULES = """HOW YOU WORK
    the real question.
 
 8. If you cannot help, say so and escalate. An honest handoff beats a confident
-   guess every time."""
+   guess every time.
+
+9. Say an order can be cancelled only when the cancel tool's decision allows it.
+   The Cancel button is added by the system. Do not invent one, and do not ask
+   the customer to copy an order number from their confirmation email when they
+   have a single unshipped order."""
 
 
 def system_prompt(session) -> str:
