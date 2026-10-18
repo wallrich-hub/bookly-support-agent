@@ -564,6 +564,46 @@ def test_cancel_ignores_an_amount_named_by_the_model(agent):
     assert "customer_id" not in schema["input_schema"]["properties"]
 
 
+def test_a_failed_status_update_keeps_cancel_and_opens_a_ticket(agent, monkeypatch):
+    """Refund succeeded, OMS cancel did not. The order is still processing, so
+    the Cancel action has to come back for the idempotent retry, and the
+    colleague the customer is told about has to be a real ticket."""
+    from app.backend.oms import get_oms
+
+    oms = get_oms()
+    original = oms.cancel_order
+
+    def fail(order_id):
+        return None
+
+    monkeypatch.setattr(oms, "cancel_order", fail)
+    s = _rich()
+    agent.handle(s, "Please cancel my order")
+    failed = agent.handle(s, "Cancel order BK-48307")
+
+    assert len(data.REFUNDS) == 1
+    refund = data.REFUNDS["CANCEL-BK-48307"]
+    assert refund["amount_gbp"] == data.ORDERS["BK-48307"]["total_gbp"]
+    assert "BK-48307" not in data.CANCELLATIONS
+    assert "escalate_to_human" in tools_used(failed)
+    assert len(data.ESCALATIONS) == 1
+    ticket = next(iter(data.ESCALATIONS.values()))
+    assert ticket["reason"] == "repeated_failure"
+    assert "BK-48307" in ticket["summary"]
+    cancel = next(a for a in failed.actions if a.get("id") == "cancel")
+    assert cancel["order_id"] == "BK-48307"
+    assert cancel["message"] == "Cancel order BK-48307"
+    assert "can be cancelled" in failed.reply.lower()
+    assert "£22.50" in failed.reply
+
+    monkeypatch.setattr(oms, "cancel_order", original)
+    retried = agent.handle(s, cancel["message"])
+    assert len(data.REFUNDS) == 1, "the retry must replay the same refund"
+    assert data.CANCELLATIONS["BK-48307"]["status"] == "cancelled"
+    assert "escalate_to_human" not in tools_used(retried)
+    assert not any(a.get("id") == "cancel" for a in retried.actions)
+
+
 def test_a_failed_cancel_refund_is_not_retried(agent, monkeypatch):
     from app.backend.payments import PaymentError, get_gateway
 

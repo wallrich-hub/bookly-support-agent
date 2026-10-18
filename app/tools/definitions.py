@@ -382,14 +382,22 @@ def _cancel_order(session, customer_id: str, order_id: str | None = None, **_ext
     if not cancelled["ok"]:
         # The money moved once, under the idempotency key. A later confirmed
         # click calls issue_refund again and gets the same refund back.
+        # The allowed decision stays on the result so that click is still offered,
+        # and cancel_error tells the planner to open a ticket rather than only
+        # promise that a colleague will confirm.
         return {
             "status": "blocked",
+            "decision": decision.to_dict(),
             "refund": _refund_view(res["data"]),
+            "cancel_error": cancelled["error"]["message"],
             "order_id": order["order_id"],
             "prompt": (
                 "The refund was issued but the order status did not update. "
-                "Do not take the money again. Say the refund is on its way and a "
-                "colleague will confirm the cancellation. Do not state a second amount."
+                "The order has not shipped, so it can be cancelled: the Cancel "
+                "action is shown again and a later click replays this same refund. "
+                "Tell them the refund amount and the timing, and that Cancel tries "
+                "the status update again. Do not state a second amount. Then escalate "
+                "so a colleague confirms the cancellation."
             ),
         }
 

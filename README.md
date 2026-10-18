@@ -461,7 +461,7 @@ app/
   policy/engine.py      deterministic business rules
   backend/              mocked OMS, carrier, payments, KB, ticketing
   static/index.html     chat UI + live execution trace
-tests/test_scenarios.py 55 agent scenario tests
+tests/test_scenarios.py 56 agent scenario tests
 tests/test_oms.py       11 OMS adapter + failure-mode tests
 tests/test_payments.py  28 Stripe gateway, money and failure-path tests
 tests/test_wire.py      10 egress-log capture and redaction tests

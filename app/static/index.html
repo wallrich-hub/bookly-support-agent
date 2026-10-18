@@ -294,7 +294,10 @@ async function sendMessage(msg){
     }
     render(data);
     renderActions(data.actions);
-  }catch(err){ thinking.textContent='Connection error: '+err.message; }
+  }catch(err){
+    thinking.textContent='Connection error: '+err.message;
+    document.querySelectorAll('.order-card button').forEach(b=>{ b.disabled=false; });
+  }
   btn.disabled=false; input.focus(); log.scrollTop=log.scrollHeight;
 }
 

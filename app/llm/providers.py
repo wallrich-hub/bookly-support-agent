@@ -413,9 +413,15 @@ class MockProvider:
                     "working days."
                 )
             if refund:
-                return _say(
-                    f"The refund of £{refund['amount_gbp']:.2f} is on its way, but I couldn't "
-                    "update the order status. A colleague will confirm the cancellation."
+                # Money moved; the warehouse status did not. Escalate in this turn
+                # so the promise of a colleague is a ticket, not only a sentence.
+                return _call(
+                    "escalate_to_human",
+                    reason="repeated_failure",
+                    summary=(
+                        f"Refund issued for {oid} (£{refund['amount_gbp']:.2f}) but the "
+                        f"order status did not update: {res.get('cancel_error', 'cancel failed')}"
+                    ),
                 )
             decision = res.get("decision") or {}
             if decision.get("allowed"):
@@ -444,9 +450,20 @@ class MockProvider:
             for m in reversed(messages):
                 if m.get("role") != "tool":
                     continue
-                if m.get("name") == "cancel_order" and (m.get("content") or {}).get("refund_error"):
-                    preface = "I wasn't able to cancel that order or put the refund through. "
-                    break
+                if m.get("name") == "cancel_order":
+                    content = m.get("content") or {}
+                    stuck = content.get("refund") or {}
+                    if stuck and content.get("status") != "ok":
+                        oid = content.get("order_id", "the order")
+                        preface = (
+                            f"The refund of £{stuck['amount_gbp']:.2f} for {oid} is on its "
+                            "way, but the order status did not update. It can be cancelled "
+                            "if you use Cancel again. "
+                        )
+                        break
+                    if content.get("refund_error"):
+                        preface = "I wasn't able to cancel that order or put the refund through. "
+                        break
                 # A refund that failed at the processor outranks anything the
                 # eligibility check said - it was eligible, that is the point.
                 if m.get("name") == "create_return" and (m.get("content") or {}).get("refund_error"):
