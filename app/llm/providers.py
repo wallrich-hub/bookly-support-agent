@@ -354,9 +354,17 @@ class MockProvider:
                              order_id=o["order_id"], sku=o["items"][0]["sku"])
             ship = o.get("shipment")
             if ship:
-                return _say(
+                # delivery_line is already a UK date, written in code from the
+                # tool value. Quoting it avoids turning a delivered parcel into
+                # "due" on the carrier estimate.
+                line = o.get("delivery_line") or ""
+                spoken = (
                     f"{o['order_id']} is {o['status'].replace('_',' ')} with {ship['carrier']}. "
-                    f"Latest scan: {ship['last_scan']}. It's due {ship['expected_delivery']}.")
+                    f"Latest scan: {ship['last_scan']}."
+                )
+                if line:
+                    spoken = f"{spoken} {line}"
+                return _say(spoken)
             return _say(f"{o['order_id']} is still {o['status']} in our Chelmsford warehouse — "
                         "you'll get a tracking email the moment it's dispatched.")
 

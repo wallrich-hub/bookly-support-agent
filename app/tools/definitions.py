@@ -24,6 +24,52 @@ from .registry import Registry, Tool
 
 # --- handlers --------------------------------------------------------------
 
+_MONTHS = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+
+def format_uk_date(value: str | None) -> str | None:
+    """Speak an ISO date as '20 October 2026'.
+
+    The tool value stays the source of the calendar day. The model is not
+    asked to convert it: a wrong conversion is how a delivered parcel was
+    announced as due on the carrier's estimate.
+    """
+    text = (value or "").strip()
+    if len(text) < 10 or text[4] != "-" or text[7] != "-":
+        return None
+    try:
+        year, month, day = (int(text[:4]), int(text[5:7]), int(text[8:10]))
+    except ValueError:
+        return None
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    return f"{day} {_MONTHS[month - 1]} {year}"
+
+
+def delivery_line(status: str, delivered_at: str | None, shipment: dict | None) -> str | None:
+    """The sentence a status reply may quote. None when there is no shipment.
+
+    A delivered parcel speaks delivered_at. An in-transit parcel speaks the
+    carrier expected_delivery as an estimate. Neither sentence says the parcel
+    is "due" on the other date.
+    """
+    if not shipment:
+        return None
+    ship_status = str(shipment.get("status") or "")
+    delivered = status == "delivered" or ship_status == "delivered" or bool(delivered_at)
+    if delivered:
+        spoken = format_uk_date(delivered_at)
+        if spoken:
+            return f"It was delivered on {spoken}."
+        return "It has been delivered."
+    spoken = format_uk_date(str(shipment.get("expected_delivery") or ""))
+    if spoken:
+        return f"The carrier estimates delivery on {spoken}."
+    return None
+
 
 def _identify_customer(session, email: str) -> dict[str, Any]:
     res = api.get_customer_by_email(email)
@@ -104,7 +150,17 @@ def _get_order_status(session, order_id: str) -> dict[str, Any]:
                 "last_scan": ship["data"]["last_scan"],
                 "expected_delivery": ship["data"]["expected_delivery"],
             }
-    return {"status": "ok", "order": payload}
+    line = delivery_line(
+        order["status"], payload.get("delivered_at"), payload.get("shipment"),
+    )
+    out: dict[str, Any] = {"status": "ok", "order": payload}
+    if line:
+        payload["delivery_line"] = line
+        out["prompt"] = (
+            "Tell them the status. Say delivery_line exactly as written. "
+            "Do not convert the date, and do not say the parcel is due on any other date."
+        )
+    return out
 
 
 def _check_return_eligibility(session, order_id: str, sku: str) -> dict[str, Any]:

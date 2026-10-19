@@ -46,7 +46,7 @@ Force a specific provider with `LLM_PROVIDER=anthropic|openai|mock`.
 Run the scenario suite:
 
 ```bash
-pytest -q          # 104 tests, ~0.4s, no network
+pytest -q          # 107 tests, ~0.4s, no network
 ```
 
 ### What the LLM does, and what it is not allowed to do
@@ -58,6 +58,7 @@ schema, and the orchestrator executes them in a loop. What is deliberate is how
 | Decision | Made by |
 |---|---|
 | Which tool to call, and the wording of every reply | **the model** |
+| The spoken delivery date | the tool, already formatted from `delivered_at` or the carrier estimate |
 | Whether to ask a clarifying question | the tool registry (`need_slot`) |
 | Whether two matching orders are ambiguous | the tool registry |
 | Is this return eligible, and for how much | the policy engine |
@@ -197,7 +198,7 @@ implementations, chosen by environment variable:
 | Source | in-process seed data | live REST calls to mockapi.io |
 | Network | none | required |
 | Speed | instant | real latency |
-| Use for | the demo, and all 104 tests | proving the integration is real |
+| Use for | the demo, and all 107 tests | proving the integration is real |
 
 **Set it up:**
 

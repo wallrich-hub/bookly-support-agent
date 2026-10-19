@@ -584,6 +584,66 @@ def test_a_failed_cancel_refund_is_not_retried(agent, monkeypatch):
     assert "escalate_to_human" in tools_used(t)
 
 
+def test_delivered_shipment_states_delivered_at_not_the_estimate(agent):
+    """A delivered parcel is spoken from delivered_at, never as due on the estimate."""
+    from app.tools.definitions import format_uk_date
+
+    s = _rich()
+    order = data.ORDERS["BK-47110"]
+    ship = data.SHIPMENTS[order["tracking_id"]]
+    delivered = format_uk_date(order["delivered_at"])
+    estimate = format_uk_date(ship["expected_delivery"])
+
+    t = agent.handle(s, "Where is BK-47110?")
+    assert delivered in t.reply
+    assert f"It was delivered on {delivered}" in t.reply
+    assert "due" not in t.reply.lower()
+    assert "estimat" not in t.reply.lower()
+    # The carrier estimate is a different fact. Even when it falls on the same
+    # calendar day, the reply must not present it as the date the parcel is due.
+    assert ship["expected_delivery"] not in t.reply
+    assert estimate is None or "due" not in t.reply.lower()
+
+
+def test_in_transit_shipment_states_the_carrier_estimate(agent):
+    """An in-transit parcel quotes expected_delivery as an estimate, in UK form."""
+    from app.tools.definitions import format_uk_date
+
+    s = _rich()
+    ship = data.SHIPMENTS["TRK-77120"]
+    spoken = format_uk_date(ship["expected_delivery"])
+    assert spoken
+
+    t = agent.handle(s, "Where is BK-48291?")
+    assert f"The carrier estimates delivery on {spoken}" in t.reply
+    assert ship["expected_delivery"] not in t.reply
+    assert "due" not in t.reply.lower()
+    year, _month, day = ship["expected_delivery"].split("-")
+    assert spoken.split()[0] == str(int(day))
+    assert year in spoken
+
+
+def test_delivery_line_does_not_swap_the_two_dates():
+    from app.tools.definitions import delivery_line
+
+    delivered = delivery_line(
+        "delivered",
+        "2026-10-01T10:00:00+00:00",
+        {"status": "delivered", "expected_delivery": "2026-09-01"},
+    )
+    assert delivered == "It was delivered on 1 October 2026."
+    assert "September" not in delivered
+    assert "due" not in delivered.lower()
+
+    transit = delivery_line(
+        "shipped",
+        None,
+        {"status": "in_transit", "expected_delivery": "2026-10-20"},
+    )
+    assert transit == "The carrier estimates delivery on 20 October 2026."
+    assert "due" not in transit.lower()
+
+
 def test_chat_api_returns_the_cancel_action(monkeypatch):
     from fastapi.testclient import TestClient
 
