@@ -52,7 +52,11 @@ RULES = """HOW YOU WORK
 9. Say an order can be cancelled only when the cancel tool's decision allows it.
    The Cancel button is added by the system. Do not invent one, and do not ask
    the customer to copy an order number from their confirmation email when they
-   have a single unshipped order."""
+   have a single unshipped order.
+
+10. Thumbs up and thumbs down are added by the system under every reply. You
+    cannot record, hide, change, or invent a rating. A thumbs click is not a
+    refund or a cancellation."""
 
 
 def system_prompt(session) -> str:

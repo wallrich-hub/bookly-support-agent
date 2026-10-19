@@ -21,7 +21,7 @@ from typing import Any
 from .llm.base import LLMResponse
 from .llm.providers import get_provider
 from .memory import Session
-from .policy.engine import action_for_cancel
+from .policy import engine
 from .prompts import system_prompt
 from .tools.definitions import build_registry
 
@@ -54,6 +54,11 @@ class Orchestrator:
     def handle(self, session: Session, user_message: str) -> Turn:
         session.add("user", user_message)
         session.begin_turn()
+        # A thumbs click is the customer's message, but the model does not get
+        # to see it. Recording and the acknowledgement are fixed in code, so a
+        # model cannot suppress the rating, invent one, or turn it into a refund.
+        if engine.feedback_target(session, user_message) is not None:
+            return self._record_feedback(session)
         trace: list[dict[str, Any]] = []
 
         for step in range(MAX_STEPS):
@@ -117,9 +122,28 @@ class Orchestrator:
         )
         return self._finish(session, reply, trace)
 
+    def _record_feedback(self, session: Session) -> Turn:
+        result = self.registry.execute("record_reply_feedback", {}, session)
+        trace = [{
+            "step": 1,
+            "tool": "record_reply_feedback",
+            "args": {},
+            "status": result.get("status"),
+            "calls": result.get("calls", []),
+            "result": _redact(result),
+        }]
+        if result.get("status") == "ok" and result.get("acknowledgement"):
+            reply = result["acknowledgement"]
+        else:
+            reply = "I couldn't record that rating. Please use the thumbs under the reply."
+        return self._finish(session, reply, trace)
+
     def _finish(self, session: Session, reply: str, trace: list[dict[str, Any]]) -> Turn:
         actions = _actions_from_trace(trace)
         reply = _bind_cancel_claim(reply, actions)
+        reply_id = session.remember_reply(reply)
+        # Cancel stays first, when policy allowed it. Thumbs are on every reply.
+        actions.extend(engine.feedback_actions(reply_id))
         session.add("assistant", reply)
         return Turn(
             reply=reply,
@@ -136,7 +160,7 @@ def _actions_from_trace(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     for step in trace:
         for decision in _decisions(step.get("result")):
-            action = action_for_cancel(decision)
+            action = engine.action_for_cancel(decision)
             if action is None or action["order_id"] in seen:
                 continue
             seen.add(action["order_id"])

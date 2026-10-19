@@ -191,6 +191,31 @@ def send_password_reset(email: str) -> dict[str, Any]:
 # --- Human handoff ---------------------------------------------------------
 
 
+def record_reply_feedback(
+    session_id: str, reply_id: str, reply_text: str, rating: str,
+) -> dict[str, Any]:
+    """POST /v1/feedback  (idempotent on session + reply + rating)
+
+    A record of what the customer thought of one reply. Nothing here moves
+    money, cancels an order, or calls the payment gateway. A second click of
+    the same thumb replays the same record.
+    """
+    payload = {
+        "session_id": session_id,
+        "reply_id": reply_id,
+        "reply_text": reply_text,
+        "rating": rating,
+    }
+    key = f"{session_id}|{reply_id}|{rating}"
+    if key in data.FEEDBACK:
+        _audit("record_reply_feedback", payload, "replayed")
+        return _ok({**data.FEEDBACK[key], "replayed": True})
+    record = {**payload, "at": datetime.now(timezone.utc).isoformat()}
+    data.FEEDBACK[key] = record
+    _audit("record_reply_feedback", payload, "recorded")
+    return _ok(record)
+
+
 def create_escalation(
     reason: str, summary: str, customer_id: str | None, transcript: list[dict]
 ) -> dict[str, Any]:

@@ -15,6 +15,7 @@ not have a jailbreak.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -262,6 +263,89 @@ def evaluate_cancel(order: dict, customer_id: str) -> Decision:
             "titles": titles,
             "kb_ref": kb.CANCELLATION,
         },
+    )
+
+
+_FEEDBACK_CLICK = re.compile(r"^Thumbs (up|down) on reply (r[1-9][0-9]*)$")
+
+
+def feedback_message(reply_id: str, rating: str) -> str:
+    """The chat message a thumbs click sends. The tool treats this as the write."""
+    word = "up" if rating == "positive" else "down"
+    return f"Thumbs {word} on reply {reply_id}"
+
+
+def feedback_acknowledgement(rating: str) -> str:
+    """Fixed wording. The model does not get to rephrase a rating."""
+    if rating == "negative":
+        return "Thanks — I've noted that this reply wasn't helpful."
+    return "Thanks — I've noted that this reply helped."
+
+
+def feedback_actions(reply_id: str) -> list[dict]:
+    """Thumbs for one assistant reply. Always offered; the client does not decide."""
+    return [
+        {
+            "id": "feedback",
+            "label": "👍",
+            "rating": "positive",
+            "reply_id": reply_id,
+            "message": feedback_message(reply_id, "positive"),
+        },
+        {
+            "id": "feedback",
+            "label": "👎",
+            "rating": "negative",
+            "reply_id": reply_id,
+            "message": feedback_message(reply_id, "negative"),
+        },
+    ]
+
+
+def feedback_target(session, message: str):
+    """The reply a thumbs click names, or None when the message is not one.
+
+    The reply text is the sentence the server stored when it sent that reply.
+    A model cannot aim this at a sentence it just invented.
+    """
+    match = _FEEDBACK_CLICK.match((message or "").strip())
+    if match is None:
+        return None
+    rating = "positive" if match.group(1) == "up" else "negative"
+    reply_id = match.group(2)
+    reply = next(
+        (row for row in getattr(session, "replies", ()) if row.get("id") == reply_id),
+        None,
+    )
+    text = str((reply or {}).get("text") or "").strip()
+    if reply is None or not text:
+        return None
+    return rating, reply
+
+
+def evaluate_feedback(rating: str, reply_text: str, reply_known: bool) -> Decision:
+    """May this thumbs click be stored?
+
+    Allowed only for a positive or negative rating of a reply this session
+    actually sent. Storing it does not refund, cancel, or take a payment.
+    """
+    if rating not in ("positive", "negative"):
+        return Decision(
+            allowed=False,
+            code="invalid_rating",
+            reason="A rating is thumbs up or thumbs down.",
+        )
+    if not reply_known or not str(reply_text or "").strip():
+        return Decision(
+            allowed=False,
+            code="unknown_reply",
+            reason="That reply is not in this conversation.",
+        )
+    return Decision(
+        allowed=True,
+        code="feedback_allowed",
+        reason="The rating is recorded against this reply.",
+        facts={"rating": rating},
     )
 
 

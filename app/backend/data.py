@@ -149,6 +149,9 @@ REFUNDS: dict[str, dict] = {}
 ESCALATIONS: dict[str, dict] = {}
 PASSWORD_RESETS: list[dict] = []
 AUDIT_LOG: list[dict] = []
+# session|reply|rating -> what the customer thought of one assistant reply.
+# Support reads this. It is not a refund, a cancellation, or a payment.
+FEEDBACK: dict[str, dict] = {}
 # order_id -> cancellation record. Kept off the seed rows so a cancel in one
 # test cannot change BK-48307 for the next, and so the reset endpoint can
 # put the demo back without rewriting the catalogue.

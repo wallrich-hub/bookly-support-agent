@@ -86,6 +86,12 @@
     .order-card{width:100%;flex-wrap:wrap}
     .order-card .action{margin-left:auto}
   }
+  .feedback{align-self:flex-start;display:flex;gap:6px;margin-top:-6px}
+  button.feedback-btn{background:transparent;color:inherit;border:1px solid var(--line);
+        width:36px;height:32px;padding:0;border-radius:999px;font-size:16px;
+        font-weight:400;line-height:1}
+  button.feedback-btn:hover{border-color:var(--dim);background:var(--panel)}
+  button.feedback-btn:disabled{opacity:.45;cursor:default}
   #reset,#theme{background:transparent;color:var(--dim);border:1px solid var(--line);
          padding:4px 11px;border-radius:999px;font-size:11px;font-weight:500}
   #reset:hover,#theme:hover{color:var(--ink);border-color:var(--dim)}
@@ -275,10 +281,35 @@ function renderCalls(calls){
 
 let turnNo = 0, httpCalls = 0;
 
+function renderFeedback(actions, anchor){
+  const items=(actions||[]).filter(a=>a && a.id==='feedback');
+  if(!items.length || !anchor) return;
+  const row=document.createElement('div');
+  row.className='feedback';
+  row.setAttribute('role','group');
+  row.setAttribute('aria-label','Rate this reply');
+  items.forEach(a=>{
+    const b=document.createElement('button');
+    const spoken=a.rating==='negative'?'Thumbs down':a.rating==='positive'?'Thumbs up':'Rate this reply';
+    b.type='button';
+    b.className='feedback-btn';
+    b.textContent=a.label||'';
+    b.setAttribute('aria-label', spoken);
+    b.title=spoken;
+    b.addEventListener('click', ()=>{
+      row.querySelectorAll('button').forEach(x=>{ x.disabled=true; });
+      sendMessage(a.message, a.label);
+    });
+    row.appendChild(b);
+  });
+  anchor.insertAdjacentElement('afterend', row);
+}
+
 function renderActions(actions){
   document.querySelectorAll('.order-card').forEach(n=>n.remove());
-  if(!actions || !actions.length) return;
-  actions.forEach(a=>{
+  const orders=(actions||[]).filter(a=>a && a.id!=='feedback');
+  if(!orders.length) return;
+  orders.forEach(a=>{
     const titles=Array.isArray(a.titles)?a.titles.filter(Boolean):[];
     const card=document.createElement('div');
     card.className='order-card';
@@ -325,10 +356,10 @@ function render(data){
     : '<div class="empty">Nothing established yet.</div>';
 }
 
-async function sendMessage(msg){
+async function sendMessage(msg, display){
   if(!msg) return;
   document.querySelectorAll('.order-card button').forEach(b=>{ b.disabled=true; });
-  bubble(msg,'user'); btn.disabled=true;
+  bubble(display||msg,'user'); btn.disabled=true;
   const thinking=bubble('…','bot');
   try{
     const r=await fetch('/api/chat',{method:'POST',
@@ -337,12 +368,15 @@ async function sendMessage(msg){
     const data=await r.json();
     sid=data.session_id;
     thinking.textContent=data.reply;
+    let anchor=thinking;
     if(data.citations && data.citations.length){
       const c=document.createElement('div'); c.className='cite';
       c.textContent='grounded in '+data.citations.join(', ');
       log.appendChild(c);
+      anchor=c;
     }
     render(data);
+    renderFeedback(data.actions, anchor);
     renderActions(data.actions);
   }catch(err){ thinking.textContent='Connection error: '+err.message; }
   btn.disabled=false; input.focus(); log.scrollTop=log.scrollHeight;

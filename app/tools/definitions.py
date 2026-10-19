@@ -1,4 +1,4 @@
-"""The nine tools the model is allowed to call.
+"""The ten tools the model is allowed to call.
 
 Note the asymmetry with app/backend/bookly_api.py. The Bookly systems expose
 generic CRUD; the model gets a narrower, intent-shaped surface:
@@ -461,6 +461,53 @@ def _cancel_order(session, customer_id: str, order_id: str | None = None, **_ext
     }
 
 
+def _latest_user_text(session) -> str:
+    for message in reversed(session.working):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        return content if isinstance(content, str) else ""
+    return ""
+
+
+def _record_reply_feedback(session, **_extra) -> dict[str, Any]:
+    """Record a thumbs click. The rating and the reply come from the click.
+
+    `_extra` absorbs a rating, a reply, or a customer id if a model invents
+    one. None of those are read. Identity is the session; the reply text is
+    the sentence the server stored for that reply id.
+    """
+    target = engine.feedback_target(session, _latest_user_text(session))
+    if target is None:
+        decision = engine.evaluate_feedback("", "", False)
+        return {
+            "status": "blocked",
+            "decision": decision.to_dict(),
+            "prompt": "There is no thumbs click to record. Do not invent a rating.",
+        }
+    rating, reply = target
+    decision = engine.evaluate_feedback(rating, reply["text"], True)
+    if not decision.allowed:
+        return {
+            "status": "blocked",
+            "decision": decision.to_dict(),
+            "prompt": "There is no thumbs click to record. Do not invent a rating.",
+        }
+    saved = api.record_reply_feedback(
+        session.session_id, reply["id"], reply["text"], rating,
+    )["data"]
+    return {
+        "status": "ok",
+        "decision": decision.to_dict(),
+        "feedback": {"rating": saved["rating"], "reply_id": saved["reply_id"]},
+        "acknowledgement": engine.feedback_acknowledgement(rating),
+        "prompt": (
+            "The rating is already recorded. The acknowledgement is fixed. "
+            "Do not add to it, and do not refund, cancel, or take a payment."
+        ),
+    }
+
+
 def _escalate(session, reason: str, summary: str) -> dict[str, Any]:
     session.escalated = True
     ticket = api.create_escalation(
@@ -579,6 +626,20 @@ def build_registry() -> Registry:
         parameters={"type": "object", "properties": {
             "email": {"type": "string"}}, "required": ["email"]},
         handler=_reset_password, required_slots=["email"], side_effecting=True,
+    ))
+
+    r.register(Tool(
+        name="record_reply_feedback",
+        description=(
+            "Record a thumbs up or thumbs down the customer has already clicked. "
+            "The rating and the reply are taken from that click. You cannot name "
+            "a rating, a reply, or a customer. Do not call this for a complaint "
+            "typed in prose; calling it then records nothing."
+        ),
+        parameters={"type": "object", "properties": {}, "required": []},
+        handler=_record_reply_feedback,
+        required_slots=[],
+        side_effecting=True,
     ))
 
     r.register(Tool(

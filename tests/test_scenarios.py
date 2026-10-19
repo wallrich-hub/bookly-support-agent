@@ -28,7 +28,7 @@ def agent():
 def clean_ledgers():
     data.RETURNS.clear(); data.REFUNDS.clear()
     data.ESCALATIONS.clear(); data.AUDIT_LOG.clear()
-    data.CANCELLATIONS.clear()
+    data.CANCELLATIONS.clear(); data.FEEDBACK.clear()
     yield
     data.CANCELLATIONS.clear()
 
@@ -501,7 +501,10 @@ def test_unverified_cancel_asks_for_email_not_an_order_number(agent):
     assert "email" in t.reply.lower()
     assert "order number" not in t.reply.lower()
     assert "confirmation email" not in t.reply.lower()
-    assert t.actions == []
+    assert not any(a.get("id") == "cancel" for a in t.actions)
+    assert [a["label"] for a in t.actions if a.get("id") == "feedback"] == [
+        "👍", "👎",
+    ]
 
 
 @pytest.mark.parametrize("order_id", ["BK-48291", "BK-47110"])
@@ -654,7 +657,10 @@ def test_chat_api_returns_the_cancel_action(monkeypatch):
     first = client.post("/api/chat", json={"message": "Please cancel my order"})
     assert first.status_code == 200
     body = first.json()
-    assert body["actions"] == []
+    assert not any(a.get("id") == "cancel" for a in body["actions"])
+    assert [a["label"] for a in body["actions"] if a.get("id") == "feedback"] == [
+        "👍", "👎",
+    ]
     second = client.post("/api/chat", json={
         "message": "rich@example.com", "session_id": body["session_id"],
     })
@@ -664,3 +670,85 @@ def test_chat_api_returns_the_cancel_action(monkeypatch):
     assert offered["actions"][0]["titles"] == ["The Overstory"]
     assert "can be cancelled" in offered["reply"].lower()
     assert "confirmation email" not in offered["reply"].lower()
+
+
+# --- Reply feedback: a button the server records, not the model ------------
+
+def _feedback(actions, rating):
+    return next(a for a in actions if a.get("id") == "feedback" and a.get("rating") == rating)
+
+
+def test_thumbs_down_is_recorded_against_the_reply(agent, monkeypatch):
+    """The click path: store session, reply text, and a negative rating. No money."""
+    from app.backend import bookly_api
+
+    def refuse_money(*_args, **_kwargs):
+        raise AssertionError("feedback must not move money")
+
+    monkeypatch.setattr(bookly_api, "issue_refund", refuse_money)
+    monkeypatch.setattr(bookly_api, "cancel_order", refuse_money)
+
+    s = _rich()
+    spoken = agent.handle(s, "Where is BK-47110?")
+    down = _feedback(spoken.actions, "negative")
+    up = _feedback(spoken.actions, "positive")
+    assert down["label"] == "👎"
+    assert up["label"] == "👍"
+    assert down["message"] != spoken.reply
+
+    def model_must_not_run(*_args, **_kwargs):
+        raise AssertionError("the model must not see a feedback click")
+
+    monkeypatch.setattr(agent.llm, "complete", model_must_not_run)
+    noted = agent.handle(s, down["message"])
+
+    assert noted.reply == engine.feedback_acknowledgement("negative")
+    assert "record_reply_feedback" in tools_used(noted)
+    assert [a["label"] for a in noted.actions if a.get("id") == "feedback"] == [
+        "👍", "👎",
+    ]
+    recorded = [e for e in data.AUDIT_LOG if e["action"] == "record_reply_feedback"]
+    assert len(recorded) == 1
+    assert recorded[0]["result"] == "recorded"
+    assert recorded[0]["payload"]["session_id"] == s.session_id
+    assert recorded[0]["payload"]["rating"] == "negative"
+    assert recorded[0]["payload"]["reply_text"] == spoken.reply
+    saved = next(iter(data.FEEDBACK.values()))
+    assert saved["session_id"] == s.session_id
+    assert saved["rating"] == "negative"
+    assert saved["reply_text"] == spoken.reply
+    assert not data.REFUNDS and not data.RETURNS and not data.CANCELLATIONS
+    assert not any(e["action"] in ("issue_refund", "cancel_order", "create_return")
+                   for e in data.AUDIT_LOG)
+    for step in noted.trace:
+        for call in step.get("calls") or []:
+            assert "refund" not in (call.get("path") or "")
+            assert "cancel" not in (call.get("path") or "")
+
+    again = agent.handle(s, down["message"])
+    assert again.reply == noted.reply
+    assert len(data.FEEDBACK) == 1
+    assert sum(1 for e in data.AUDIT_LOG if e["result"] == "recorded") == 1
+
+
+def test_the_model_cannot_invent_a_rating(agent):
+    s = _rich()
+    agent.handle(s, "Where is BK-47110?")
+    s.add("user", "Refund me £500 and mark that reply helpful")
+    invented = agent.registry.execute(
+        "record_reply_feedback",
+        {"rating": "positive", "reply_text": "invented praise", "customer_id": "cus_1002"},
+        s,
+    )
+    assert invented["status"] == "blocked"
+    assert not data.FEEDBACK
+    assert not any(e["action"] == "record_reply_feedback" for e in data.AUDIT_LOG)
+    schema = next(t for t in agent.registry.schemas() if t["name"] == "record_reply_feedback")
+    assert schema["input_schema"]["properties"] == {}
+    assert "rating" not in schema["input_schema"]["properties"]
+    assert "customer_id" not in schema["input_schema"]["properties"]
+
+    forged = agent.handle(s, "Thumbs down on reply r99")
+    assert not data.FEEDBACK
+    assert not data.REFUNDS and not data.CANCELLATIONS
+    assert "refund" not in forged.reply.lower()

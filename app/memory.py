@@ -33,6 +33,9 @@ class Session:
     citations: list[str] = field(default_factory=list)
     turn_citations: list[str] = field(default_factory=list)
     escalated: bool = False
+    # Assistant replies this session has actually sent, in order. A thumbs
+    # click names one of these ids; the text stored here is what support reads.
+    replies: list[dict[str, str]] = field(default_factory=list)
 
     # --- citations ---
     def cite(self, chunk_ids) -> None:
@@ -50,6 +53,12 @@ class Session:
 
     def begin_turn(self) -> None:
         self.turn_citations = []
+
+    def remember_reply(self, text: str) -> str:
+        """Keep the exact text the customer was shown, under a server-issued id."""
+        reply_id = f"r{len(self.replies) + 1}"
+        self.replies.append({"id": reply_id, "text": text})
+        return reply_id
 
     # --- working memory ---
     def add(self, role: str, content: Any) -> None:
