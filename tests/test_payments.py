@@ -9,12 +9,13 @@ What matters about a refund integration is not the happy path. It is:
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 import httpx
 import pytest
 
 from app.backend import data
-from app.backend.money import from_minor_units, to_minor_units
+from app.backend.money import from_minor_units, refund_for_total, to_minor_units
 from app.backend.payments import (LedgerGateway, PaymentError, StripeGateway,
                                   set_gateway)
 from app.memory import Session
@@ -25,7 +26,7 @@ from app.orchestrator import Orchestrator
 def clean():
     yield
     set_gateway(None)
-    data.RETURNS.clear(); data.REFUNDS.clear()
+    data.RETURNS.clear(); data.REFUNDS.clear(); data.CANCELLATIONS.clear()
     data.ESCALATIONS.clear(); data.AUDIT_LOG.clear()
 
 
@@ -62,6 +63,16 @@ def refund_response(amount: int, **over):
 ])
 def test_minor_units_are_exact(gbp, pence):
     assert to_minor_units(gbp) == pence
+
+
+def test_a_cancellation_refunds_the_order_total_in_decimal():
+    """22.50 must not take a detour through binary float before it is money."""
+    assert refund_for_total(22.50) == Decimal("22.50")
+    assert refund_for_total("22.50") == Decimal("22.50")
+    assert to_minor_units(refund_for_total(22.50)) == 2250
+    # The classic penny. Deriving from the total has to survive it too.
+    assert refund_for_total(18.30) == Decimal("18.30")
+    assert to_minor_units(refund_for_total(18.30)) == 1830
 
 
 def test_zero_decimal_currencies_are_not_multiplied():

@@ -58,6 +58,7 @@ def chat(req: ChatRequest):
         "trace": turn.trace,
         "citations": turn.citations,
         "escalated": turn.escalated,
+        "actions": turn.actions,
         "verified": {k: v for k, v in session.verified.items()
                      if not isinstance(v, (dict, list))},
     }
@@ -77,10 +78,12 @@ def admin_reset():
     cleared = {
         "returns": len(data.RETURNS), "refunds": len(data.REFUNDS),
         "escalations": len(data.ESCALATIONS), "audit_entries": len(data.AUDIT_LOG),
+        "cancellations": len(data.CANCELLATIONS),
         "sessions": len(SESSIONS),
     }
     data.RETURNS.clear(); data.REFUNDS.clear(); data.ESCALATIONS.clear()
     data.PASSWORD_RESETS.clear(); data.AUDIT_LOG.clear()
+    data.CANCELLATIONS.clear()
     SESSIONS.clear()
 
     # Pick up any PaymentIntents the reset script just created.

@@ -18,6 +18,7 @@ a customer's Commerce Cloud or a homegrown OMS touches one file.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from . import data, wire
@@ -54,6 +55,7 @@ class OrderSource(Protocol):
     def list_orders(self, customer_id: str) -> list[dict[str, Any]]: ...
     def get_order(self, order_id: str) -> dict[str, Any] | None: ...
     def get_shipment(self, tracking_id: str) -> dict[str, Any] | None: ...
+    def cancel_order(self, order_id: str) -> dict[str, Any] | None: ...
 
 
 # =====================================================================
@@ -72,24 +74,56 @@ class InMemoryOMS:
 
     def list_orders(self, customer_id):
         with wire.local("oms:memory", f"list_orders({customer_id})") as call:
-            rows = [o for o in data.ORDERS.values() if o["customer_id"] == customer_id]
+            rows = [self._view(o) for o in data.ORDERS.values()
+                    if o["customer_id"] == customer_id]
             rows.sort(key=lambda o: o["placed_at"], reverse=True)
             call.done(summary=f"{len(rows)} orders")
             return rows
 
     def get_order(self, order_id):
         with wire.local("oms:memory", f"get_order({order_id})") as call:
-            order = data.ORDERS.get((order_id or "").strip().upper())
+            raw = data.ORDERS.get((order_id or "").strip().upper())
+            order = self._view(raw)
             call.done(summary=order["status"] if order else "not found")
-            if order is None:
+            return order
+
+    def cancel_order(self, order_id):
+        """Mark an order cancelled. Idempotent: a second call returns the same row.
+
+        The seed catalogue is not rewritten. The cancellation lives in
+        CANCELLATIONS and `_view` applies it, so a reset drops the overlay
+        and the order is processing again.
+        """
+        key = (order_id or "").strip().upper()
+        with wire.local("oms:memory", f"cancel_order({key})") as call:
+            if key not in data.ORDERS:
+                call.done(summary="not found")
                 return None
-            return {**order, "payment_intent_id": order.get("payment_intent_id")}
+            if key not in data.CANCELLATIONS:
+                data.CANCELLATIONS[key] = {
+                    "order_id": key,
+                    "status": "cancelled",
+                    "cancelled_at": datetime.now(timezone.utc).isoformat(),
+                }
+            call.done(summary="cancelled")
+            return self._view(data.ORDERS[key])
 
     def get_shipment(self, tracking_id):
         with wire.local("oms:memory", f"get_shipment({tracking_id})") as call:
             ship = data.SHIPMENTS.get(tracking_id)
             call.done(summary=ship["status"] if ship else "not found")
             return ship
+
+    @staticmethod
+    def _view(order: dict | None) -> dict | None:
+        if order is None:
+            return None
+        viewed = {**order, "payment_intent_id": order.get("payment_intent_id")}
+        cancel = data.CANCELLATIONS.get(viewed["order_id"])
+        if cancel:
+            viewed["status"] = "cancelled"
+            viewed["cancelled_at"] = cancel["cancelled_at"]
+        return viewed
 
 
 # =====================================================================
@@ -238,6 +272,36 @@ class BooklyHttpOMS:
     def get_shipment(self, tracking_id):
         rows = self._get("/shipments", tracking_id=tracking_id)
         return self._shipment(self._first(rows))
+
+    def cancel_order(self, order_id):
+        """PUT the order to cancelled. One attempt, no retry.
+
+        A status write is not money, but retrying it blindly is still the
+        wrong habit next to the refund this cancellation is about to make.
+        The read above may retry once; this PUT does not.
+        """
+        import httpx
+
+        key = (order_id or "").strip().upper()
+        raw = self._first(self._get("/orders", order_id=key))
+        if not raw or not raw.get("id"):
+            return None
+        path = f"/orders/{raw['id']}"
+        with wire.span("oms:mockapi", "PUT", path, params={"status": "cancelled"}) as call:
+            try:
+                response = self._client.put(path, json={"status": "cancelled"})
+                call.done(status=response.status_code,
+                          summary=_summarise(response.status_code, response))
+                if response.status_code >= 400:
+                    return None
+                body = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                call.note(outcome="error")
+                call.done(summary=f"{type(exc).__name__}: {exc}")
+                return None
+        if not isinstance(body, dict):
+            body = {**raw, "status": "cancelled"}
+        return self._order(body)
 
 
 # =====================================================================
