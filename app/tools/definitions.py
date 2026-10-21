@@ -1,4 +1,4 @@
-"""The nine tools the model is allowed to call.
+"""The ten tools the model is allowed to call.
 
 Note the asymmetry with app/backend/bookly_api.py. The Bookly systems expose
 generic CRUD; the model gets a narrower, intent-shaped surface:
@@ -23,6 +23,52 @@ from ..policy import engine
 from .registry import Registry, Tool
 
 # --- handlers --------------------------------------------------------------
+
+_MONTHS = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+
+def format_uk_date(value: str | None) -> str | None:
+    """Speak an ISO date as '20 October 2026'.
+
+    The tool value stays the source of the calendar day. The model is not
+    asked to convert it: a wrong conversion is how a delivered parcel was
+    announced as due on the carrier's estimate.
+    """
+    text = (value or "").strip()
+    if len(text) < 10 or text[4] != "-" or text[7] != "-":
+        return None
+    try:
+        year, month, day = (int(text[:4]), int(text[5:7]), int(text[8:10]))
+    except ValueError:
+        return None
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    return f"{day} {_MONTHS[month - 1]} {year}"
+
+
+def delivery_line(status: str, delivered_at: str | None, shipment: dict | None) -> str | None:
+    """The sentence a status reply may quote. None when there is no shipment.
+
+    A delivered parcel speaks delivered_at. An in-transit parcel speaks the
+    carrier expected_delivery as an estimate. Neither sentence says the parcel
+    is "due" on the other date.
+    """
+    if not shipment:
+        return None
+    ship_status = str(shipment.get("status") or "")
+    delivered = status == "delivered" or ship_status == "delivered" or bool(delivered_at)
+    if delivered:
+        spoken = format_uk_date(delivered_at)
+        if spoken:
+            return f"It was delivered on {spoken}."
+        return "It has been delivered."
+    spoken = format_uk_date(str(shipment.get("expected_delivery") or ""))
+    if spoken:
+        return f"The carrier estimates delivery on {spoken}."
+    return None
 
 
 def _identify_customer(session, email: str) -> dict[str, Any]:
@@ -104,7 +150,17 @@ def _get_order_status(session, order_id: str) -> dict[str, Any]:
                 "last_scan": ship["data"]["last_scan"],
                 "expected_delivery": ship["data"]["expected_delivery"],
             }
-    return {"status": "ok", "order": payload}
+    line = delivery_line(
+        order["status"], payload.get("delivered_at"), payload.get("shipment"),
+    )
+    out: dict[str, Any] = {"status": "ok", "order": payload}
+    if line:
+        payload["delivery_line"] = line
+        out["prompt"] = (
+            "Tell them the status. Say delivery_line exactly as written. "
+            "Do not convert the date, and do not say the parcel is due on any other date."
+        )
+    return out
 
 
 def _check_return_eligibility(session, order_id: str, sku: str) -> dict[str, Any]:
@@ -405,6 +461,53 @@ def _cancel_order(session, customer_id: str, order_id: str | None = None, **_ext
     }
 
 
+def _latest_user_text(session) -> str:
+    for message in reversed(session.working):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        return content if isinstance(content, str) else ""
+    return ""
+
+
+def _record_reply_feedback(session, **_extra) -> dict[str, Any]:
+    """Record a thumbs click. The rating and the reply come from the click.
+
+    `_extra` absorbs a rating, a reply, or a customer id if a model invents
+    one. None of those are read. Identity is the session; the reply text is
+    the sentence the server stored for that reply id.
+    """
+    target = engine.feedback_target(session, _latest_user_text(session))
+    if target is None:
+        decision = engine.evaluate_feedback("", "", False)
+        return {
+            "status": "blocked",
+            "decision": decision.to_dict(),
+            "prompt": "There is no thumbs click to record. Do not invent a rating.",
+        }
+    rating, reply = target
+    decision = engine.evaluate_feedback(rating, reply["text"], True)
+    if not decision.allowed:
+        return {
+            "status": "blocked",
+            "decision": decision.to_dict(),
+            "prompt": "There is no thumbs click to record. Do not invent a rating.",
+        }
+    saved = api.record_reply_feedback(
+        session.session_id, reply["id"], reply["text"], rating,
+    )["data"]
+    return {
+        "status": "ok",
+        "decision": decision.to_dict(),
+        "feedback": {"rating": saved["rating"], "reply_id": saved["reply_id"]},
+        "acknowledgement": engine.feedback_acknowledgement(rating),
+        "prompt": (
+            "The rating is already recorded. The acknowledgement is fixed. "
+            "Do not add to it, and do not refund, cancel, or take a payment."
+        ),
+    }
+
+
 def _escalate(session, reason: str, summary: str) -> dict[str, Any]:
     session.escalated = True
     ticket = api.create_escalation(
@@ -523,6 +626,20 @@ def build_registry() -> Registry:
         parameters={"type": "object", "properties": {
             "email": {"type": "string"}}, "required": ["email"]},
         handler=_reset_password, required_slots=["email"], side_effecting=True,
+    ))
+
+    r.register(Tool(
+        name="record_reply_feedback",
+        description=(
+            "Record a thumbs up or thumbs down the customer has already clicked. "
+            "The rating and the reply are taken from that click. You cannot name "
+            "a rating, a reply, or a customer. Do not call this for a complaint "
+            "typed in prose; calling it then records nothing."
+        ),
+        parameters={"type": "object", "properties": {}, "required": []},
+        handler=_record_reply_feedback,
+        required_slots=[],
+        side_effecting=True,
     ))
 
     r.register(Tool(

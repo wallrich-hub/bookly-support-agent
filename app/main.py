@@ -79,11 +79,12 @@ def admin_reset():
         "returns": len(data.RETURNS), "refunds": len(data.REFUNDS),
         "escalations": len(data.ESCALATIONS), "audit_entries": len(data.AUDIT_LOG),
         "cancellations": len(data.CANCELLATIONS),
+        "feedback": len(data.FEEDBACK),
         "sessions": len(SESSIONS),
     }
     data.RETURNS.clear(); data.REFUNDS.clear(); data.ESCALATIONS.clear()
     data.PASSWORD_RESETS.clear(); data.AUDIT_LOG.clear()
-    data.CANCELLATIONS.clear()
+    data.CANCELLATIONS.clear(); data.FEEDBACK.clear()
     SESSIONS.clear()
 
     # Pick up any PaymentIntents the reset script just created.
@@ -101,5 +102,6 @@ def audit():
         "returns": list(data.RETURNS.values()),
         "refunds": list(data.REFUNDS.values()),
         "escalations": list(data.ESCALATIONS.values()),
+        "feedback": list(data.FEEDBACK.values()),
         "log": data.AUDIT_LOG,
     }

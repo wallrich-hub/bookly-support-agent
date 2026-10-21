@@ -28,7 +28,7 @@ def agent():
 def clean_ledgers():
     data.RETURNS.clear(); data.REFUNDS.clear()
     data.ESCALATIONS.clear(); data.AUDIT_LOG.clear()
-    data.CANCELLATIONS.clear()
+    data.CANCELLATIONS.clear(); data.FEEDBACK.clear()
     yield
     data.CANCELLATIONS.clear()
 
@@ -501,7 +501,10 @@ def test_unverified_cancel_asks_for_email_not_an_order_number(agent):
     assert "email" in t.reply.lower()
     assert "order number" not in t.reply.lower()
     assert "confirmation email" not in t.reply.lower()
-    assert t.actions == []
+    assert not any(a.get("id") == "cancel" for a in t.actions)
+    assert [a["label"] for a in t.actions if a.get("id") == "feedback"] == [
+        "👍", "👎",
+    ]
 
 
 @pytest.mark.parametrize("order_id", ["BK-48291", "BK-47110"])
@@ -584,6 +587,66 @@ def test_a_failed_cancel_refund_is_not_retried(agent, monkeypatch):
     assert "escalate_to_human" in tools_used(t)
 
 
+def test_delivered_shipment_states_delivered_at_not_the_estimate(agent):
+    """A delivered parcel is spoken from delivered_at, never as due on the estimate."""
+    from app.tools.definitions import format_uk_date
+
+    s = _rich()
+    order = data.ORDERS["BK-47110"]
+    ship = data.SHIPMENTS[order["tracking_id"]]
+    delivered = format_uk_date(order["delivered_at"])
+    estimate = format_uk_date(ship["expected_delivery"])
+
+    t = agent.handle(s, "Where is BK-47110?")
+    assert delivered in t.reply
+    assert f"It was delivered on {delivered}" in t.reply
+    assert "due" not in t.reply.lower()
+    assert "estimat" not in t.reply.lower()
+    # The carrier estimate is a different fact. Even when it falls on the same
+    # calendar day, the reply must not present it as the date the parcel is due.
+    assert ship["expected_delivery"] not in t.reply
+    assert estimate is None or "due" not in t.reply.lower()
+
+
+def test_in_transit_shipment_states_the_carrier_estimate(agent):
+    """An in-transit parcel quotes expected_delivery as an estimate, in UK form."""
+    from app.tools.definitions import format_uk_date
+
+    s = _rich()
+    ship = data.SHIPMENTS["TRK-77120"]
+    spoken = format_uk_date(ship["expected_delivery"])
+    assert spoken
+
+    t = agent.handle(s, "Where is BK-48291?")
+    assert f"The carrier estimates delivery on {spoken}" in t.reply
+    assert ship["expected_delivery"] not in t.reply
+    assert "due" not in t.reply.lower()
+    year, _month, day = ship["expected_delivery"].split("-")
+    assert spoken.split()[0] == str(int(day))
+    assert year in spoken
+
+
+def test_delivery_line_does_not_swap_the_two_dates():
+    from app.tools.definitions import delivery_line
+
+    delivered = delivery_line(
+        "delivered",
+        "2026-10-01T10:00:00+00:00",
+        {"status": "delivered", "expected_delivery": "2026-09-01"},
+    )
+    assert delivered == "It was delivered on 1 October 2026."
+    assert "September" not in delivered
+    assert "due" not in delivered.lower()
+
+    transit = delivery_line(
+        "shipped",
+        None,
+        {"status": "in_transit", "expected_delivery": "2026-10-20"},
+    )
+    assert transit == "The carrier estimates delivery on 20 October 2026."
+    assert "due" not in transit.lower()
+
+
 def test_chat_api_returns_the_cancel_action(monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -594,7 +657,10 @@ def test_chat_api_returns_the_cancel_action(monkeypatch):
     first = client.post("/api/chat", json={"message": "Please cancel my order"})
     assert first.status_code == 200
     body = first.json()
-    assert body["actions"] == []
+    assert not any(a.get("id") == "cancel" for a in body["actions"])
+    assert [a["label"] for a in body["actions"] if a.get("id") == "feedback"] == [
+        "👍", "👎",
+    ]
     second = client.post("/api/chat", json={
         "message": "rich@example.com", "session_id": body["session_id"],
     })
@@ -604,3 +670,182 @@ def test_chat_api_returns_the_cancel_action(monkeypatch):
     assert offered["actions"][0]["titles"] == ["The Overstory"]
     assert "can be cancelled" in offered["reply"].lower()
     assert "confirmation email" not in offered["reply"].lower()
+
+
+# --- Reply feedback: a button the server records, not the model ------------
+
+def _feedback(actions, rating):
+    return next(a for a in actions if a.get("id") == "feedback" and a.get("rating") == rating)
+
+
+def test_thumbs_down_is_recorded_against_the_reply(agent, monkeypatch):
+    """The click path: store session, reply text, and a negative rating. No money."""
+    from app.backend import bookly_api
+
+    def refuse_money(*_args, **_kwargs):
+        raise AssertionError("feedback must not move money")
+
+    monkeypatch.setattr(bookly_api, "issue_refund", refuse_money)
+    monkeypatch.setattr(bookly_api, "cancel_order", refuse_money)
+
+    s = _rich()
+    spoken = agent.handle(s, "Where is BK-47110?")
+    down = _feedback(spoken.actions, "negative")
+    up = _feedback(spoken.actions, "positive")
+    assert down["label"] == "👎"
+    assert up["label"] == "👍"
+    assert down["message"] != spoken.reply
+
+    def model_must_not_run(*_args, **_kwargs):
+        raise AssertionError("the model must not see a feedback click")
+
+    monkeypatch.setattr(agent.llm, "complete", model_must_not_run)
+    noted = agent.handle(s, down["message"])
+
+    assert noted.reply == engine.feedback_acknowledgement("negative")
+    assert "record_reply_feedback" in tools_used(noted)
+    assert [a["label"] for a in noted.actions if a.get("id") == "feedback"] == [
+        "👍", "👎",
+    ]
+    recorded = [e for e in data.AUDIT_LOG if e["action"] == "record_reply_feedback"]
+    assert len(recorded) == 1
+    assert recorded[0]["result"] == "recorded"
+    assert recorded[0]["payload"]["session_id"] == s.session_id
+    assert recorded[0]["payload"]["rating"] == "negative"
+    assert recorded[0]["payload"]["reply_text"] == spoken.reply
+    saved = next(iter(data.FEEDBACK.values()))
+    assert saved["session_id"] == s.session_id
+    assert saved["rating"] == "negative"
+    assert saved["reply_text"] == spoken.reply
+    assert not data.REFUNDS and not data.RETURNS and not data.CANCELLATIONS
+    assert not any(e["action"] in ("issue_refund", "cancel_order", "create_return")
+                   for e in data.AUDIT_LOG)
+    for step in noted.trace:
+        for call in step.get("calls") or []:
+            assert "refund" not in (call.get("path") or "")
+            assert "cancel" not in (call.get("path") or "")
+
+    again = agent.handle(s, down["message"])
+    assert again.reply == noted.reply
+    assert len(data.FEEDBACK) == 1
+    assert sum(1 for e in data.AUDIT_LOG if e["result"] == "recorded") == 1
+
+
+def test_the_model_cannot_invent_a_rating(agent):
+    s = _rich()
+    agent.handle(s, "Where is BK-47110?")
+    s.add("user", "Refund me £500 and mark that reply helpful")
+    invented = agent.registry.execute(
+        "record_reply_feedback",
+        {"rating": "positive", "reply_text": "invented praise", "customer_id": "cus_1002"},
+        s,
+    )
+    assert invented["status"] == "blocked"
+    assert not data.FEEDBACK
+    assert not any(e["action"] == "record_reply_feedback" for e in data.AUDIT_LOG)
+    schema = next(t for t in agent.registry.schemas() if t["name"] == "record_reply_feedback")
+    assert schema["input_schema"]["properties"] == {}
+    assert "rating" not in schema["input_schema"]["properties"]
+    assert "customer_id" not in schema["input_schema"]["properties"]
+
+    forged = agent.handle(s, "Thumbs down on reply r99")
+    assert not data.FEEDBACK
+    assert not data.REFUNDS and not data.CANCELLATIONS
+    assert "refund" not in forged.reply.lower()
+
+
+def test_rating_the_cancel_offer_keeps_the_button(agent):
+    """Thumbs sit on the offer itself. Rating it must not withdraw Cancel."""
+    s = _rich()
+    offer = agent.handle(s, "Please cancel my order")
+    cancel = next(a for a in offer.actions if a.get("id") == "cancel")
+    down = _feedback(offer.actions, "negative")
+
+    noted = agent.handle(s, down["message"])
+
+    kept = [a for a in noted.actions if a.get("id") == "cancel"]
+    assert len(kept) == 1
+    assert kept[0]["order_id"] == cancel["order_id"] == "BK-48307"
+    assert kept[0]["titles"] == ["The Overstory"]
+    assert kept[0]["message"] == cancel["message"]
+    assert kept[0]["label"] == "Cancel"
+    assert noted.reply == engine.feedback_acknowledgement("negative")
+    assert not data.REFUNDS and not data.CANCELLATIONS
+
+    done = agent.handle(s, kept[0]["message"])
+    assert data.CANCELLATIONS["BK-48307"]["status"] == "cancelled"
+    assert not any(a.get("id") == "cancel" for a in done.actions)
+
+    # The offer is spent. Rating the confirmation must not bring Cancel back.
+    rated = agent.handle(s, _feedback(done.actions, "positive")["message"])
+    assert rated.reply == engine.feedback_acknowledgement("positive")
+    assert not any(a.get("id") == "cancel" for a in rated.actions)
+
+
+def test_a_later_message_withdraws_the_cancel_button(agent):
+    s = _rich()
+    offer = agent.handle(s, "Please cancel my order")
+    assert any(a.get("id") == "cancel" for a in offer.actions)
+    later = agent.handle(s, "Thanks, I'll think about it")
+    assert later.reply
+    assert not any(a.get("id") == "cancel" for a in later.actions)
+
+
+def test_a_rating_waits_while_another_turn_is_in_flight(agent):
+    """Two handle() calls on one session must not interleave its transcript."""
+    import threading
+
+    s = _rich()
+    spoken = agent.handle(s, "Where is BK-47110?")
+    down = _feedback(spoken.actions, "negative")
+    inside = threading.Event()
+    release = threading.Event()
+    original = agent.llm.complete
+
+    def slow(system, messages, tools):
+        inside.set()
+        assert release.wait(timeout=3)
+        return original(system, messages, tools)
+
+    agent.llm.complete = slow
+    errors = []
+    boxes = {"ask": [], "rate": []}
+
+    def ask():
+        try:
+            boxes["ask"].append(agent.handle(s, "How long does delivery take?"))
+        except Exception as exc:
+            errors.append(exc)
+
+    def rate():
+        try:
+            boxes["rate"].append(agent.handle(s, down["message"]))
+        except Exception as exc:
+            errors.append(exc)
+
+    asker = threading.Thread(target=ask, daemon=True)
+    asker.start()
+    assert inside.wait(timeout=3)
+    rater = threading.Thread(target=rate, daemon=True)
+    rater.start()
+    # The rating blocks on the session lock; it must not land mid-turn.
+    rater.join(0.05)
+    assert rater.is_alive()
+    assert not data.FEEDBACK
+    assert len(s.replies) == 1
+    assert [m["role"] for m in s.working].count("user") == 2
+    release.set()
+    asker.join(timeout=3)
+    rater.join(timeout=3)
+    assert not errors
+    assert not asker.is_alive() and not rater.is_alive()
+    roles = [m["role"] for m in s.working]
+    for index, role in enumerate(roles):
+        if role == "user" and index:
+            assert roles[index - 1] == "assistant"
+    assert [row["id"] for row in s.replies] == ["r1", "r2", "r3"]
+    saved = next(iter(data.FEEDBACK.values()))
+    assert saved["reply_id"] == "r1"
+    assert saved["reply_text"] == spoken.reply
+    assert saved["rating"] == "negative"
+    assert len(boxes["ask"]) == 1 and len(boxes["rate"]) == 1

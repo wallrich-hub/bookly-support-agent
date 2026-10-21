@@ -16,6 +16,7 @@ non-event. A customer can type "I am cus_1002" all day; nothing reads it.
 
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -33,6 +34,18 @@ class Session:
     citations: list[str] = field(default_factory=list)
     turn_citations: list[str] = field(default_factory=list)
     escalated: bool = False
+    # Assistant replies this session has actually sent, in order. A thumbs
+    # click names one of these ids; the text stored here is what support reads.
+    replies: list[dict[str, str]] = field(default_factory=list)
+    # The Cancel offer still on screen. A rating repeats it; a later typed
+    # message replaces this list with whatever that turn allows.
+    offered_actions: list[dict[str, Any]] = field(default_factory=list)
+    # Chat runs synchronous handlers on a thread pool. One lock per session
+    # so two turns cannot interleave working memory, reply ids, or the user
+    # text a rating is bound to.
+    _turn_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False,
+    )
 
     # --- citations ---
     def cite(self, chunk_ids) -> None:
@@ -50,6 +63,12 @@ class Session:
 
     def begin_turn(self) -> None:
         self.turn_citations = []
+
+    def remember_reply(self, text: str) -> str:
+        """Keep the exact text the customer was shown, under a server-issued id."""
+        reply_id = f"r{len(self.replies) + 1}"
+        self.replies.append({"id": reply_id, "text": text})
+        return reply_id
 
     # --- working memory ---
     def add(self, role: str, content: Any) -> None:

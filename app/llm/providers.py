@@ -207,6 +207,12 @@ class MockProvider:
         ).lower()
         verified_email = "email:" in system
 
+        # The orchestrator records a real thumbs click before the model runs.
+        # This branch is the backstop for a message that only looks like one,
+        # so it is not mistaken for a return, a cancellation, or a refund.
+        if re.fullmatch(r"thumbs (up|down) on reply r[1-9][0-9]*", text.strip()):
+            return _call("record_reply_feedback")
+
         # Injection is not a security control - the policy plane is. But naming
         # it is better CX than silently routing an attacker into a happy path.
         if INJECTION_RE.search(text):
@@ -354,9 +360,17 @@ class MockProvider:
                              order_id=o["order_id"], sku=o["items"][0]["sku"])
             ship = o.get("shipment")
             if ship:
-                return _say(
+                # delivery_line is already a UK date, written in code from the
+                # tool value. Quoting it avoids turning a delivered parcel into
+                # "due" on the carrier estimate.
+                line = o.get("delivery_line") or ""
+                spoken = (
                     f"{o['order_id']} is {o['status'].replace('_',' ')} with {ship['carrier']}. "
-                    f"Latest scan: {ship['last_scan']}. It's due {ship['expected_delivery']}.")
+                    f"Latest scan: {ship['last_scan']}."
+                )
+                if line:
+                    spoken = f"{spoken} {line}"
+                return _say(spoken)
             return _say(f"{o['order_id']} is still {o['status']} in our Chelmsford warehouse — "
                         "you'll get a tracking email the moment it's dispatched.")
 
@@ -436,6 +450,13 @@ class MockProvider:
             return _say("I've sent a reset link to that address — if there's a Bookly "
                         "account on it, the email will be with you shortly. The link is "
                         "valid for 30 minutes.")
+
+        if name == "record_reply_feedback":
+            if status == "ok":
+                return _say(res.get("acknowledgement") or "Thanks, I've noted that.")
+            return _say(
+                "I can only record a thumbs up or thumbs down from the buttons under a reply."
+            )
 
         if name == "escalate_to_human":
             # Never hand off without saying why. Look back for the decision that
