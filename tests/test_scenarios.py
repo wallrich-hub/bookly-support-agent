@@ -752,3 +752,100 @@ def test_the_model_cannot_invent_a_rating(agent):
     assert not data.FEEDBACK
     assert not data.REFUNDS and not data.CANCELLATIONS
     assert "refund" not in forged.reply.lower()
+
+
+def test_rating_the_cancel_offer_keeps_the_button(agent):
+    """Thumbs sit on the offer itself. Rating it must not withdraw Cancel."""
+    s = _rich()
+    offer = agent.handle(s, "Please cancel my order")
+    cancel = next(a for a in offer.actions if a.get("id") == "cancel")
+    down = _feedback(offer.actions, "negative")
+
+    noted = agent.handle(s, down["message"])
+
+    kept = [a for a in noted.actions if a.get("id") == "cancel"]
+    assert len(kept) == 1
+    assert kept[0]["order_id"] == cancel["order_id"] == "BK-48307"
+    assert kept[0]["titles"] == ["The Overstory"]
+    assert kept[0]["message"] == cancel["message"]
+    assert kept[0]["label"] == "Cancel"
+    assert noted.reply == engine.feedback_acknowledgement("negative")
+    assert not data.REFUNDS and not data.CANCELLATIONS
+
+    done = agent.handle(s, kept[0]["message"])
+    assert data.CANCELLATIONS["BK-48307"]["status"] == "cancelled"
+    assert not any(a.get("id") == "cancel" for a in done.actions)
+
+    # The offer is spent. Rating the confirmation must not bring Cancel back.
+    rated = agent.handle(s, _feedback(done.actions, "positive")["message"])
+    assert rated.reply == engine.feedback_acknowledgement("positive")
+    assert not any(a.get("id") == "cancel" for a in rated.actions)
+
+
+def test_a_later_message_withdraws_the_cancel_button(agent):
+    s = _rich()
+    offer = agent.handle(s, "Please cancel my order")
+    assert any(a.get("id") == "cancel" for a in offer.actions)
+    later = agent.handle(s, "Thanks, I'll think about it")
+    assert later.reply
+    assert not any(a.get("id") == "cancel" for a in later.actions)
+
+
+def test_a_rating_waits_while_another_turn_is_in_flight(agent):
+    """Two handle() calls on one session must not interleave its transcript."""
+    import threading
+
+    s = _rich()
+    spoken = agent.handle(s, "Where is BK-47110?")
+    down = _feedback(spoken.actions, "negative")
+    inside = threading.Event()
+    release = threading.Event()
+    original = agent.llm.complete
+
+    def slow(system, messages, tools):
+        inside.set()
+        assert release.wait(timeout=3)
+        return original(system, messages, tools)
+
+    agent.llm.complete = slow
+    errors = []
+    boxes = {"ask": [], "rate": []}
+
+    def ask():
+        try:
+            boxes["ask"].append(agent.handle(s, "How long does delivery take?"))
+        except Exception as exc:
+            errors.append(exc)
+
+    def rate():
+        try:
+            boxes["rate"].append(agent.handle(s, down["message"]))
+        except Exception as exc:
+            errors.append(exc)
+
+    asker = threading.Thread(target=ask, daemon=True)
+    asker.start()
+    assert inside.wait(timeout=3)
+    rater = threading.Thread(target=rate, daemon=True)
+    rater.start()
+    # The rating blocks on the session lock; it must not land mid-turn.
+    rater.join(0.05)
+    assert rater.is_alive()
+    assert not data.FEEDBACK
+    assert len(s.replies) == 1
+    assert [m["role"] for m in s.working].count("user") == 2
+    release.set()
+    asker.join(timeout=3)
+    rater.join(timeout=3)
+    assert not errors
+    assert not asker.is_alive() and not rater.is_alive()
+    roles = [m["role"] for m in s.working]
+    for index, role in enumerate(roles):
+        if role == "user" and index:
+            assert roles[index - 1] == "assistant"
+    assert [row["id"] for row in s.replies] == ["r1", "r2", "r3"]
+    saved = next(iter(data.FEEDBACK.values()))
+    assert saved["reply_id"] == "r1"
+    assert saved["reply_text"] == spoken.reply
+    assert saved["rating"] == "negative"
+    assert len(boxes["ask"]) == 1 and len(boxes["rate"]) == 1

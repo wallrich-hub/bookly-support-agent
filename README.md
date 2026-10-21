@@ -46,7 +46,7 @@ Force a specific provider with `LLM_PROVIDER=anthropic|openai|mock`.
 Run the scenario suite:
 
 ```bash
-pytest -q          # 109 tests, ~0.4s, no network
+pytest -q          # 112 tests, ~0.4s, no network
 ```
 
 ### What the LLM does, and what it is not allowed to do
@@ -199,7 +199,7 @@ implementations, chosen by environment variable:
 | Source | in-process seed data | live REST calls to mockapi.io |
 | Network | none | required |
 | Speed | instant | real latency |
-| Use for | the demo, and all 109 tests | proving the integration is real |
+| Use for | the demo, and all 112 tests | proving the integration is real |
 
 **Set it up:**
 

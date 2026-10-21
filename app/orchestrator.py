@@ -52,6 +52,14 @@ class Orchestrator:
         return self.llm.name
 
     def handle(self, session: Session, user_message: str) -> Turn:
+        # Two POSTs for one session (a follow-up and a thumbs click) otherwise
+        # share this object with no coordination. Hold the lock across the
+        # whole turn, including the user-message append, so reply ids and the
+        # text a rating binds to stay in order.
+        with session._turn_lock:
+            return self._handle(session, user_message)
+
+    def _handle(self, session: Session, user_message: str) -> Turn:
         session.add("user", user_message)
         session.begin_turn()
         # A thumbs click is the customer's message, but the model does not get
@@ -136,10 +144,18 @@ class Orchestrator:
             reply = result["acknowledgement"]
         else:
             reply = "I couldn't record that rating. Please use the thumbs under the reply."
-        return self._finish(session, reply, trace)
+        return self._finish(session, reply, trace, preserve_offers=True)
 
-    def _finish(self, session: Session, reply: str, trace: list[dict[str, Any]]) -> Turn:
+    def _finish(self, session: Session, reply: str, trace: list[dict[str, Any]],
+                preserve_offers: bool = False) -> Turn:
         actions = _actions_from_trace(trace)
+        if preserve_offers:
+            # This turn only stored a rating. Cancel was decided on an earlier
+            # turn and is still open; the client redraws every order card from
+            # this list, so the offer has to be here or the button disappears.
+            actions = _still_offered(session)
+        else:
+            session.offered_actions = [dict(action) for action in actions]
         reply = _bind_cancel_claim(reply, actions)
         reply_id = session.remember_reply(reply)
         # Cancel stays first, when policy allowed it. Thumbs are on every reply.
@@ -152,6 +168,21 @@ class Orchestrator:
             escalated=session.escalated,
             actions=actions,
         )
+
+
+def _still_offered(session: Session) -> list[dict[str, Any]]:
+    """Order actions from the last real turn, while policy still allows them.
+
+    A typed follow-up clears `offered_actions`. A cancel that already went
+    through sets `cancel_code` to something else, and the button must not
+    come back on a later rating.
+    """
+    if session.verified.get("cancel_code") != "cancel_allowed":
+        return []
+    return [
+        dict(action) for action in session.offered_actions
+        if action.get("id") == "cancel"
+    ]
 
 
 def _actions_from_trace(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:

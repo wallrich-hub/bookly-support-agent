@@ -280,6 +280,25 @@ function renderCalls(calls){
 }
 
 let turnNo = 0, httpCalls = 0;
+// One /api/chat at a time. Thumbs stay on older replies; without this a
+// click can POST while a follow-up is still in flight.
+let sending = false;
+
+function holdFeedback(){
+  document.querySelectorAll('.feedback-btn').forEach(b=>{
+    if(b.disabled) return;
+    b.disabled=true;
+    b.dataset.held='1';
+  });
+}
+
+function releaseFeedback(){
+  document.querySelectorAll('.feedback-btn').forEach(b=>{
+    if(!b.dataset.held) return;
+    b.disabled=false;
+    delete b.dataset.held;
+  });
+}
 
 function renderFeedback(actions, anchor){
   const items=(actions||[]).filter(a=>a && a.id==='feedback');
@@ -297,6 +316,7 @@ function renderFeedback(actions, anchor){
     b.setAttribute('aria-label', spoken);
     b.title=spoken;
     b.addEventListener('click', ()=>{
+      if(sending) return;
       row.querySelectorAll('button').forEach(x=>{ x.disabled=true; });
       sendMessage(a.message, a.label);
     });
@@ -357,8 +377,10 @@ function render(data){
 }
 
 async function sendMessage(msg, display){
-  if(!msg) return;
+  if(!msg || sending) return;
+  sending=true;
   document.querySelectorAll('.order-card button').forEach(b=>{ b.disabled=true; });
+  holdFeedback();
   bubble(display||msg,'user'); btn.disabled=true;
   const thinking=bubble('…','bot');
   try{
@@ -379,11 +401,19 @@ async function sendMessage(msg, display){
     renderFeedback(data.actions, anchor);
     renderActions(data.actions);
   }catch(err){ thinking.textContent='Connection error: '+err.message; }
-  btn.disabled=false; input.focus(); log.scrollTop=log.scrollHeight;
+  finally{
+    sending=false;
+    releaseFeedback();
+    // A failed send never redraws the card, so the Cancel button disabled
+    // at the start of this turn has to work again.
+    document.querySelectorAll('.order-card button').forEach(b=>{ b.disabled=false; });
+    btn.disabled=false; input.focus(); log.scrollTop=log.scrollHeight;
+  }
 }
 
 form.onsubmit=e=>{
   e.preventDefault();
+  if(sending) return;
   const msg=input.value.trim(); if(!msg) return;
   input.value='';
   sendMessage(msg);
