@@ -19,6 +19,7 @@ from typing import Any
 
 from ..backend import bookly_api as api
 from ..backend import kb
+from ..memory import has_customer_exchange
 from ..policy import engine
 from .registry import Registry, Tool
 
@@ -137,8 +138,10 @@ def _check_return_eligibility(session, order_id: str, sku: str) -> dict[str, Any
     out = {"status": "ok", "decision": decision.to_dict()}
     if decision.allowed and not decision.requires_human:
         out["prompt"] = (
-            "Eligible. State the refund amount EXACTLY as given in facts. Confirm "
-            "with the customer before creating the return - do not create it unasked."
+            "Eligible. The item can be refunded for the amount in facts — state "
+            "that amount EXACTLY, as something that can be refunded. Do not say a "
+            "refund has been issued. Confirm with the customer before creating the "
+            "return - do not create it unasked."
         )
     else:
         out["prompt"] = (
@@ -193,8 +196,11 @@ def _create_return(session, order_id: str, sku: str, reason: str) -> dict[str, A
             "expected_in_account_days": refund["expected_in_account_days"],
             "provider": refund["provider"],
         }
-        payload["prompt"] = ("Return created and refund issued. Give the RMA, the amount, "
-                             "and where the label is. Be brief and warm.")
+        payload["prompt"] = (
+            "Return created and refund issued. This result includes refund.refund_id. "
+            "Give the RMA, the amount, and where the label is. Be brief and warm. "
+            "Say a refund was issued only because that id is present."
+        )
     else:
         payload["refund"] = None
         payload["authorisation"] = auth.to_dict()
@@ -410,11 +416,24 @@ def _escalate(session, reason: str, summary: str) -> dict[str, Any]:
     ticket = api.create_escalation(
         reason, summary, session.verified.get("customer_id"), session.working
     )["data"]
+    # The model is told whether the turns were stored. It is not given the
+    # transcript to interpret.
+    saved = has_customer_exchange(ticket.get("transcript") or [])
+    if saved:
+        prompt = (
+            "Hand off warmly. Give the ticket reference. The chat is on the "
+            "ticket, so they will not have to repeat themselves."
+        )
+    else:
+        prompt = (
+            "Hand off warmly. Give the ticket reference. Do not say the chat "
+            "was included, and do not say they will not have to repeat themselves."
+        )
     return {
         "status": "ok",
         "ticket_id": ticket["ticket_id"],
-        "prompt": ("Hand off warmly. Give the ticket reference, say what you have already "
-                   "passed on so they will not have to repeat themselves."),
+        "transcript_saved": saved,
+        "prompt": prompt,
     }
 
 

@@ -143,6 +143,14 @@ def _say(text: str) -> LLMResponse:
     return LLMResponse(text=text)
 
 
+def _refund_issued(refund: Any) -> bool:
+    """True only when this turn's tool result carries a refund id.
+
+    An eligibility amount is not an issued refund. Chat prose is not either.
+    """
+    return isinstance(refund, dict) and bool(refund.get("refund_id"))
+
+
 class MockProvider:
     """Rule-based planner. Same interface, no network, fully deterministic.
 
@@ -365,8 +373,8 @@ class MockProvider:
             if d.get("allowed") and not d.get("requires_human"):
                 amt = d["facts"]["refund_amount_gbp"]
                 title = d["facts"].get("title", "the item")
-                return _say(f"Good news — {title} is inside your return window, so I can "
-                            f"refund £{amt:.2f} in full. Shall I set the return up and send "
+                return _say(f"Good news — {title} is inside your return window, so it can be "
+                            f"refunded for £{amt:.2f}. Shall I set the return up and send "
                             "you a prepaid label?")
             if d.get("requires_human"):
                 return _call("escalate_to_human", reason="guardrail_block",
@@ -383,7 +391,7 @@ class MockProvider:
                 return _call("escalate_to_human", reason="repeated_failure",
                              summary=(f"Return {res['rma']} created but the refund "
                                       f"failed at the processor: {res['refund_error']}"))
-            if refund:
+            if _refund_issued(refund):
                 return _say(
                     f"Done. Your return reference is {res['rma']} and I've issued a "
                     f"£{refund['amount_gbp']:.2f} refund — it'll be back on your card within "
@@ -406,13 +414,13 @@ class MockProvider:
                 )
             refund = res.get("refund")
             oid = res.get("order_id", "The order")
-            if refund and status == "ok":
+            if _refund_issued(refund) and status == "ok":
                 return _say(
                     f"Done. {oid} is cancelled and I've refunded £{refund['amount_gbp']:.2f}. "
                     f"It'll be back on your card within {refund['expected_in_account_days']} "
                     "working days."
                 )
-            if refund:
+            if _refund_issued(refund):
                 return _say(
                     f"The refund of £{refund['amount_gbp']:.2f} is on its way, but I couldn't "
                     "update the order status. A colleague will confirm the cancellation."
@@ -465,9 +473,13 @@ class MockProvider:
                     preface = ("That's outside what I can confirm from our help centre, and "
                                "I'd rather be right than quick. ")
                     break
-            return _say(f"{preface}I've passed this to a specialist — your reference is "
-                        f"{res['ticket_id']}. I've included everything from our chat, so "
-                        "you won't need to repeat yourself. They'll be in touch shortly.")
+            handed = (f"{preface}I've passed this to a specialist — your reference is "
+                      f"{res['ticket_id']}.")
+            # Claim the chat was included only when those turns are on the ticket.
+            if res.get("transcript_saved"):
+                handed += (" I've included everything from our chat, so "
+                           "you won't need to repeat yourself.")
+            return _say(handed + " They'll be in touch shortly.")
 
         return _say("Let me get a colleague to pick this up for you.")
 

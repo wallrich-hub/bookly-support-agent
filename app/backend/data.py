@@ -144,6 +144,11 @@ SHIPMENTS = {
 
 # Side-effect ledgers. Every write the agent makes lands here so the demo can
 # show that actions are real, idempotent and auditable.
+# REFUNDS is written only by bookly_api.issue_refund, after the gateway
+# succeeds. A sentence in the chat does not create a row.
+# ESCALATIONS keep the transcript passed into create_escalation, for a person
+# to read. That text is untrusted and is not a source of identity, amounts,
+# or permission.
 RETURNS: dict[str, dict] = {}
 REFUNDS: dict[str, dict] = {}
 ESCALATIONS: dict[str, dict] = {}

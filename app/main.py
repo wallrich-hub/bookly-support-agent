@@ -96,7 +96,11 @@ def admin_reset():
 
 @app.get("/api/audit")
 def audit():
-    """Every side effect the agent has caused this process. Proof the actions are real."""
+    """Every side effect the agent has caused this process.
+
+    Escalation records include `transcript`, the turns create_escalation was
+    given, so a specialist can read what was said. That text is untrusted.
+    """
     return {
         "returns": list(data.RETURNS.values()),
         "refunds": list(data.REFUNDS.values()),

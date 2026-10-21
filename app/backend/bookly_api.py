@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timezone  # noqa: F401  (audit timestamps)
 from typing import Any
 
+from ..memory import copy_transcript
 from . import data
 from .oms import OmsUnavailable, get_oms
 from .payments import PaymentError, get_gateway  # noqa: F401
@@ -140,6 +141,9 @@ def issue_refund(order_id: str, amount_gbp: float, rma: str,
                  payment_intent_id: str | None = None) -> dict[str, Any]:
     """Move the money, through whichever gateway is configured.
 
+    This is the only writer of data.REFUNDS, and only after the gateway
+    succeeds. Chat prose never creates a row, and a failed call is not retried.
+
     Two layers of idempotency, deliberately. The local check short-circuits a
     replay without a network call; the gateway is ALSO given the RMA as an
     idempotency key, so a replay that gets past us (different process, restarted
@@ -194,15 +198,22 @@ def send_password_reset(email: str) -> dict[str, Any]:
 def create_escalation(
     reason: str, summary: str, customer_id: str | None, transcript: list[dict]
 ) -> dict[str, Any]:
-    """POST /v1/escalations -> ticketing system"""
+    """POST /v1/escalations -> ticketing system
+
+    The transcript is stored so a specialist can read the turns. It is
+    customer-written and untrusted: this function does not read identity,
+    amounts, or permission out of it.
+    """
     ticket = f"TKT-{uuid.uuid4().hex[:6].upper()}"
+    stored = copy_transcript(transcript)
     data.ESCALATIONS[ticket] = {
         "ticket_id": ticket,
         "reason": reason,
         "summary": summary,
         "customer_id": customer_id,
         "priority": "high" if reason in ("policy_gap", "guardrail_block") else "normal",
-        "transcript_turns": len(transcript),
+        "transcript_turns": len(stored),
+        "transcript": stored,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     _audit("create_escalation", {"reason": reason}, ticket)

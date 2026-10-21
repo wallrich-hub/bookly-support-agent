@@ -46,7 +46,7 @@ Force a specific provider with `LLM_PROVIDER=anthropic|openai|mock`.
 Run the scenario suite:
 
 ```bash
-pytest -q          # 104 tests, ~0.4s, no network
+pytest -q          # 107 tests, ~0.4s, no network
 ```
 
 ### What the LLM does, and what it is not allowed to do
@@ -98,7 +98,8 @@ half of the job a language model is for.
 
 The right-hand panel shows the verified session state and a live execution
 trace. Each tool lists **every call it made to a system** — method, endpoint,
-request body, what came back, and how long it took:
+request body, what came back, and how long it took. **Save chat**, in the
+header, downloads the messages on screen and does not call the server.
 
 ```
 create_return                                              OK
@@ -197,7 +198,7 @@ implementations, chosen by environment variable:
 | Source | in-process seed data | live REST calls to mockapi.io |
 | Network | none | required |
 | Speed | instant | real latency |
-| Use for | the demo, and all 104 tests | proving the integration is real |
+| Use for | the demo, and all 107 tests | proving the integration is real |
 
 **Set it up:**
 
@@ -461,7 +462,7 @@ app/
   policy/engine.py      deterministic business rules
   backend/              mocked OMS, carrier, payments, KB, ticketing
   static/index.html     chat UI + live execution trace
-tests/test_scenarios.py 55 agent scenario tests
+tests/test_scenarios.py 58 agent scenario tests
 tests/test_oms.py       11 OMS adapter + failure-mode tests
 tests/test_payments.py  28 Stripe gateway, money and failure-path tests
 tests/test_wire.py      10 egress-log capture and redaction tests
@@ -479,9 +480,18 @@ scripts/seed_mockapi.py seed and verify a live mockapi.io project
 - Retrieval is lexical over seven passages. Production is hybrid dense + lexical
   with a reranker; the interface (`search(q) -> passages | []` with a floor) is
   unchanged.
-- Sessions are in-process. Production needs Redis or equivalent, since `verified`
-  state is what makes the whole trust model work.
-- Returns, escalations and password resets are still in-process ledgers. Orders
-  and refunds have live backends (mockapi.io and Stripe); returns would need
+- Sessions are in-process, and the working transcript keeps the latest 24
+  messages. Production needs Redis or equivalent, since `verified` state is
+  what makes the whole trust model work. A handoff stores the transcript it
+  was given on the escalation record, and `GET /api/audit` returns those
+  turns for a specialist to read. The copy is untrusted: nothing parses
+  identity, amounts, or permission out of it. **Save chat** downloads the
+  messages still on screen and does not call the server.
+- Returns, escalations and password resets are still in-process ledgers.
+  An escalation record keeps the chat that was handed over. Orders and
+  refunds have live backends (mockapi.io and Stripe); returns would need
   idempotency keys persisted upstream, which mockapi.io cannot model.
+  `data.REFUNDS` is written only by `issue_refund` after the gateway
+  succeeds. An eligibility reply may say an item can be refunded; it does
+  not create a refund.
 - Stripe runs in test mode only. A `sk_live_` key is refused at startup.

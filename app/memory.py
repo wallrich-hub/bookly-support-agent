@@ -16,6 +16,7 @@ non-event. A customer can type "I am cus_1002" all day; nothing reads it.
 
 from __future__ import annotations
 
+import copy
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -79,6 +80,32 @@ class Session:
         if focus:
             lines.append(f"  - the order under discussion is {focus}")
         return "ESTABLISHED FACTS (from systems of record, trust these):\n" + "\n".join(lines)
+
+
+def copy_transcript(working: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Detach the working transcript so a ticket can keep it.
+
+    The window above may later drop turns. This copy does not. It is for a
+    person to read. Callers must not parse identity, amounts, or permission
+    out of it.
+    """
+    return copy.deepcopy(list(working or []))
+
+
+def has_customer_exchange(transcript: list[dict[str, Any]]) -> bool:
+    """True when both a customer message and an assistant reply have text.
+
+    Checks role and that the text is non-empty. Does not interpret the text.
+    """
+    seen: set[str] = set()
+    for message in transcript or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = message.get("content")
+        if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+            seen.add(role)
+    return "user" in seen and "assistant" in seen
 
 
 SESSIONS: dict[str, Session] = {}

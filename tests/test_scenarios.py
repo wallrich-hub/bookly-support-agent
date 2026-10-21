@@ -9,7 +9,9 @@ below the model.
 from __future__ import annotations
 
 import os
+import re
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -604,3 +606,133 @@ def test_chat_api_returns_the_cancel_action(monkeypatch):
     assert offered["actions"][0]["titles"] == ["The Overstory"]
     assert "can be cancelled" in offered["reply"].lower()
     assert "confirmation email" not in offered["reply"].lower()
+
+
+# --- The chat that promised a refund has to be readable later ---------------
+
+_CHAT_INCLUDED = (
+    "included everything",
+    "included our chat",
+    "included the chat",
+    "included this chat",
+    "from our chat",
+    "won't need to repeat",
+    "will not need to repeat",
+    "won't have to repeat",
+    "will not have to repeat",
+)
+
+_REFUND_ISSUED = (
+    "i've issued",
+    "i have issued",
+    "i've refunded",
+    "i have refunded",
+    "has been issued",
+    "was issued",
+    "refund is on its way",
+    "issued a refund",
+)
+
+
+def _claims_chat_included(reply: str) -> bool:
+    text = reply.lower()
+    return any(phrase in text for phrase in _CHAT_INCLUDED)
+
+
+def _claims_refund_issued(reply: str) -> bool:
+    text = reply.lower()
+    return any(phrase in text for phrase in _REFUND_ISSUED)
+
+
+def _spoken(transcript):
+    return [
+        message for message in transcript
+        if isinstance(message, dict)
+        and message.get("role") in ("user", "assistant")
+        and isinstance(message.get("content"), str)
+        and message["content"].strip()
+    ]
+
+
+def test_escalation_keeps_the_chat_behind_the_ticket(agent, monkeypatch):
+    """LLM_PROVIDER=mock. A quoted refund is not a refund, and the handoff
+    keeps the turns a specialist would need to read it."""
+    assert agent.provider_name.startswith("mock")
+    s = Session()
+    agent.handle(s, "I want to return a book, it was damaged")
+    agent.handle(s, "rich@example.com")
+    quoted = agent.handle(s, "BK-47110")
+
+    assert "check_return_eligibility" in tools_used(quoted)
+    assert "create_return" not in tools_used(quoted)
+    assert data.REFUNDS == {}
+    assert "18.00" in quoted.reply
+    assert "can be refunded" in quoted.reply.lower()
+    assert not _claims_refund_issued(quoted.reply)
+    assert not any(entry["action"] == "issue_refund" for entry in data.AUDIT_LOG)
+
+    handoff = agent.handle(s, "I want to speak to a person")
+    assert "escalate_to_human" in tools_used(handoff)
+    assert data.REFUNDS == {}
+    assert len(data.ESCALATIONS) == 1
+
+    record = next(iter(data.ESCALATIONS.values()))
+    spoken = _spoken(record["transcript"])
+    roles = {message["role"] for message in spoken}
+    assert roles == {"user", "assistant"}
+    assert record["transcript_turns"] == len(record["transcript"])
+    assert any("18.00" in message["content"] for message in spoken
+               if message["role"] == "assistant")
+
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+    from fastapi.testclient import TestClient
+    from app.main import app as fastapi_app
+
+    body = TestClient(fastapi_app).get("/api/audit").json()
+    assert len(body["escalations"]) == 1
+    audited = body["escalations"][0]["transcript"]
+    assert _spoken(audited) == spoken
+    assert any("18.00" in message["content"] for message in _spoken(audited)
+               if message["role"] == "assistant")
+
+    if _claims_chat_included(handoff.reply):
+        assert any(message["role"] == "user" and message["content"].strip()
+                   for message in audited)
+        assert any(message["role"] == "assistant" and "18.00" in message["content"]
+                   for message in audited)
+    else:
+        raise AssertionError("handoff dropped the inclusion claim even though the turns are stored")
+
+    stored = list(record["transcript"])
+    agent.handle(s, "thanks, that's all")
+    assert record["transcript"] == stored
+
+
+def test_issue_refund_is_the_only_writer_of_refunds():
+    root = Path(__file__).resolve().parents[1] / "app"
+    assignments = []
+    for path in root.rglob("*.py"):
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if "REFUNDS[" in code and "=" in code:
+                assignments.append(f"{path.name}:{lineno}:{code.strip()}")
+    assert len(assignments) == 1, assignments
+    assert assignments[0].startswith("bookly_api.py:")
+    assert "data.REFUNDS[rma] = record" in assignments[0]
+
+
+def test_chat_page_can_save_the_messages_on_screen():
+    html = (Path(__file__).resolve().parents[1] / "app" / "static" / "index.html").read_text()
+    assert 'id="save"' in html
+    assert "Save chat" in html
+    screen = re.search(r"function chatOnScreen\(\)\{([\s\S]*?)\n\}", html)
+    save = re.search(r"function saveChat\(\)\{([\s\S]*?)\n\}", html)
+    assert screen and ".msg" in screen.group(1)
+    assert save
+    body = save.group(1)
+    assert "chatOnScreen" in body
+    assert "fetch(" not in body
+    assert "/api/" not in body
+    assert "sendMessage" not in body
+    assert "Blob" in body or "clipboard" in body
+    assert "saveBtn.onclick=saveChat" in html
